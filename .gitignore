@@ -25,7 +25,4 @@ config/wifi_secrets.h
 
 # macOS
 .DS_Store
-
-# Python dashboard
 __pycache__/
-.venv/

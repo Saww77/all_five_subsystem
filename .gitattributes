@@ -1,3 +1,0 @@
-*.sh text eol=lf
-*.mk text eol=lf
-build_make/makefile text eol=lf

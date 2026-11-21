@@ -1,156 +1,122 @@
-#include "barcode.h"
-#include <string.h>
+/* barcode.c: Code 39 scanner + decoder for the centre sensor.
+   Feed it one darkness sample (0..1000) per tick. */
+#include "subsystem3.h"
 
-static const uint16_t letters[] = {
-    0x109, 0x049, 0x148, 0x019, 0x118, 0x058, 0x00d, 0x10c, 0x04c,
-    0x01c, 0x103, 0x043, 0x142, 0x013, 0x112, 0x052, 0x007, 0x106,
-    0x046, 0x016, 0x181, 0x0c1, 0x1c0, 0x091, 0x190, 0x0d0
+#define BC_TH_HIGH    600    /* darkness above this = bar   */
+#define BC_TH_LOW     400    /* below this = space (hysteresis) */
+#define BC_GLITCH       2    /* runs shorter than this are noise */
+#define BC_MAX_RUN    100    /* longer than this cannot be part of a barcode */
+#define BC_BUSY_TICKS  60    /* "scanning in progress" for this long after the last edge */
+
+typedef struct { char ch; const char *pat; } C39;   /* w = wide, n = narrow, bar/space alternating */
+LOCAL const C39 c39[] = {
+    {'A',"wnnnnwnnw"},{'B',"nnwnnwnnw"},{'C',"wnwnnwnnn"},{'D',"nnnnwwnnw"},
+    {'E',"wnnnwwnnn"},{'F',"nnwnwwnnn"},{'G',"nnnnnwwnw"},{'H',"wnnnnwwnn"},
+    {'I',"nnwnnwwnn"},{'J',"nnnnwwwnn"},{'K',"wnnnnnnww"},{'L',"nnwnnnnww"},
+    {'M',"wnwnnnnwn"},{'N',"nnnnwnnww"},{'O',"wnnnwnnwn"},{'P',"nnwnwnnwn"},
+    {'Q',"nnnnnnwww"},{'R',"wnnnnnwwn"},{'S',"nnwnnnwwn"},{'T',"nnnnwnwwn"},
+    {'U',"wwnnnnnnw"},{'V',"nwwnnnnnw"},{'W',"wwwnnnnnn"},{'X',"nwnnwnnnw"},
+    {'Y',"wwnnwnnnn"},{'Z',"nwwnwnnnn"},{'*',"nwnnwnwnn"}
 };
-#define CODE39_STOP 0x094u
 
-void barcode_reset(barcode_t *reader)
+LOCAL BOOL in_bar;
+LOCAL unsigned run, nwin, idle;
+LOCAL INT win[BC_ELEMENTS];
+LOCAL char pending;
+
+LOCAL char decode_char(const INT *w)            /* w[0..8]: bar, space, bar, ... */
 {
-    memset(reader, 0, sizeof(*reader));
-}
+    BOOL wide[9];
+    INT i, k, best, wb = 32767, nb = 0, ws, ns = 0;
 
-static unsigned run(const uint8_t widths[19], unsigned index, bool reverse)
-{
-    unsigned bit = 5u * (reverse ? 28u - index : index);
-    unsigned byte = bit / 8u;
-    unsigned shift = bit % 8u;
-    unsigned value = widths[byte];
-
-    if (shift > 3u) { value |= (unsigned)widths[byte + 1u] << 8; }
-    return (value >> shift) & 31u;
-}
-
-static void store_run(uint8_t widths[19], unsigned index, unsigned mm)
-{
-    unsigned bit = 5u * index;
-    unsigned byte = bit / 8u;
-    unsigned shift = bit % 8u;
-    unsigned value = widths[byte];
-
-    if (shift > 3u) { value |= (unsigned)widths[byte + 1u] << 8; }
-    value = (value & ~(31u << shift)) | (mm << shift);
-    widths[byte] = (uint8_t)value;
-    if (shift > 3u) { widths[byte + 1u] = (uint8_t)(value >> 8); }
-}
-
-static unsigned symbol(const uint8_t widths[19], unsigned start, bool reverse,
-                       unsigned *narrow)
-{
-    unsigned widest_narrow = 0;
-    unsigned least_wide = 255;
-    unsigned small_sum = 0;
-    unsigned wide_sum = 0;
-    unsigned pattern = 0;
-    unsigned wide_count = 0;
-
-    /* Find the lower bound of the three widest runs. Validate the gap
-     * between classes after classification, including rounded edge widths. */
-    unsigned largest[3] = {0};
-    for (unsigned i = 0; i < 9; ++i) {
-        unsigned w = run(widths, start + i, reverse);
-        for (unsigned j = 0; j < 3; ++j) {
-            if (w > largest[j]) {
-                unsigned displaced = largest[j];
-                largest[j] = w;
-                w = displaced;
-            }
+    for (i = 0; i < 9; i++) { wide[i] = FALSE; }
+    for (k = 0; k < 2; k++) {                   /* the 2 widest bars */
+        best = -1;
+        for (i = 0; i < 9; i += 2) {
+            if (!wide[i] && (best < 0 || w[i] > w[best])) { best = i; }
         }
+        wide[best] = TRUE;
     }
+    best = -1;                                  /* the widest space */
+    for (i = 1; i < 9; i += 2) {
+        if (best < 0 || w[i] > w[best]) { best = i; }
+    }
+    wide[best] = TRUE;
+    ws = w[best];
 
-    for (unsigned i = 0; i < 9; ++i) {
-        unsigned w = run(widths, start + i, reverse);
-        pattern <<= 1;
-        if (w >= largest[2]) {
-            pattern |= 1u;
-            ++wide_count;
-            wide_sum += w;
-            if (w < least_wide) { least_wide = w; }
-        } else {
-            small_sum += w;
-            if (w > widest_narrow) { widest_narrow = w; }
+    for (i = 0; i < 9; i += 2) {                /* bars: wide must beat narrow */
+        if (wide[i]) { if (w[i] < wb) { wb = w[i]; } }
+        else         { if (w[i] > nb) { nb = w[i]; } }
+    }
+    for (i = 1; i < 9; i += 2) {
+        if (!wide[i] && w[i] > ns) { ns = w[i]; }
+    }
+    if (wb * 10 < nb * 13 || ws * 10 < ns * 13) { return 0; }
+
+    for (k = 0; k < (INT)(sizeof(c39) / sizeof(c39[0])); k++) {
+        for (i = 0; i < 9; i++) {
+            if ((c39[k].pat[i] == 'w') != wide[i]) { break; }
         }
-    }
-    if (wide_count != 3u || least_wide * 10u < widest_narrow * 16u ||
-        largest[0] * 10u > least_wide * 18u ||
-        wide_sum * 2u > small_sum * 5u || wide_sum * 4u < small_sum * 3u) {
-        return 0;
-    }
-    *narrow = (small_sum + 3u) / 6u;
-    return pattern;
-}
-
-static char decode(const uint8_t widths[19], bool reverse)
-{
-    unsigned narrow[3];
-    unsigned start = symbol(widths, 0, reverse, &narrow[0]);
-    unsigned body = symbol(widths, 10, reverse, &narrow[1]);
-    unsigned stop = symbol(widths, 20, reverse, &narrow[2]);
-
-    if (start != CODE39_STOP || stop != CODE39_STOP || body == 0u) {
-        return 0;
-    }
-    for (unsigned i = 0; i < 2u; ++i) {
-        unsigned gap = run(widths, 9u + 10u * i, reverse);
-        if (gap * 2u < narrow[i] || gap * 2u > narrow[i] * 3u ||
-            narrow[i] * 2u > narrow[i + 1u] * 3u ||
-            narrow[i + 1u] * 2u > narrow[i] * 3u) {
-            return 0;
-        }
-    }
-    for (unsigned i = 0; i < sizeof(letters) / sizeof(letters[0]); ++i) {
-        if (body == letters[i]) { return (char)('A' + i); }
+        if (i == 9) { return c39[k].ch; }
     }
     return 0;
 }
 
-char barcode_sample(barcode_t *reader, uint16_t darkness, uint32_t position_um)
+/* 29 elements = * (9) gap (1) X (9) gap (1) * (9) */
+LOCAL char decode29(const INT *e)
 {
-    bool black = darkness > 620u || (darkness >= 380u && reader->black);
-    unsigned width = position_um - reader->edge_um;
-
-    if (black != reader->candidate) {
-        reader->candidate = black;
-        reader->stable = 1u;
-    } else if (reader->stable < 2u) {
-        ++reader->stable;
-    }
-    if (reader->stable == 2u && black != reader->black) {
-        reader->black = black;
-        reader->edge_um = position_um;
-        if (!reader->active) {
-            if (black && reader->observed_white && width >= 7000u) {
-                reader->active = true;
-                reader->count = 0u;
-            }
-        } else if (width < 1000u || width > 22000u || reader->count >= 29u) {
-            reader->active = false;
-        } else {
-            store_run(reader->width, reader->count++, (width + 500u) / 1000u);
-        }
-        reader->observed_white = !black;
-        return 0;
-    }
-    if (!black && !reader->observed_white && reader->stable >= 2u) {
-        reader->observed_white = true;
-        reader->edge_um = position_um;
-        width = 0;
-    }
-    if (reader->active && !black && reader->count == 29u && width >= 8000u) {
-        reader->active = false;
-        char letter = decode(reader->width, false);
-        return letter != 0 ? letter : decode(reader->width, true);
-    }
-    if (reader->active && width > 24000u) {
-        reader->active = false;
-    }
-    return 0;
+    char m;
+    if (decode_char(e) != '*' || decode_char(e + 20) != '*') { return 0; }
+    m = decode_char(e + 10);
+    return (m == '*') ? 0 : m;
 }
 
-bool barcode_active(const barcode_t *reader)
+LOCAL char decode_any(const INT *e)
 {
-    return reader->active && reader->count >= 3u;
+    INT rev[BC_ELEMENTS], i;
+    char c = decode29(e);
+    if (c != 0) { return c; }
+    for (i = 0; i < BC_ELEMENTS; i++) { rev[i] = e[BC_ELEMENTS - 1 - i]; }   /* scanned backwards */
+    return decode29(rev);
+}
+
+EXPORT void barcode_reset(void)
+{
+    in_bar = FALSE; run = 0; nwin = 0; pending = 0; idle = 10000;
+}
+EXPORT BOOL barcode_busy(void) { return (nwin >= 3 && idle < BC_BUSY_TICKS); }
+EXPORT char barcode_take(void) { char c = pending; pending = 0; return c; }
+
+EXPORT void barcode_feed(INT dark)
+{
+    BOOL bar = in_bar, was_bar;
+    INT  i;
+    char c;
+
+    if (idle < 10000) { idle++; }
+    if (!in_bar && dark > BC_TH_HIGH)    { bar = TRUE; }
+    else if (in_bar && dark < BC_TH_LOW) { bar = FALSE; }
+
+    if (bar == in_bar) {
+        if (run <= BC_MAX_RUN) { run++; }
+        return;
+    }
+
+    was_bar = in_bar;                           /* the element that just ended */
+    if (run > BC_MAX_RUN || run < BC_GLITCH) {
+        nwin = 0;
+    } else {
+        if (nwin == BC_ELEMENTS) {              /* slide the window by one */
+            for (i = 1; i < BC_ELEMENTS; i++) { win[i - 1] = win[i]; }
+            nwin--;
+        }
+        win[nwin++] = run;
+        idle = 0;
+        if (was_bar && nwin == BC_ELEMENTS) {   /* 29 ending in a bar = starts with a bar */
+            c = decode_any(win);
+            if (c != 0) { pending = c; nwin = 0; }
+        }
+    }
+    in_bar = bar;
+    run = 1;
 }

@@ -1,187 +1,379 @@
-"""Serve the car status and route configuration on localhost."""
+#!/usr/bin/env python3
+"""Local browser dashboard for the existing Buddy 1 binary MQTT protocol.
 
+Run in Ubuntu/WSL (or Windows Python):
+    python3 app.py 192.168.1.10
+No firmware or broker WebSocket changes are required.
+"""
 import argparse
+from collections import deque
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hmac
+import ipaddress
 import json
-import os
+from pathlib import Path
+import re
+import secrets
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from urllib.parse import urlsplit
+import uuid
 
-import paho.mqtt.client as mqtt
+from mqtt_protocol import command_payload, decode_telemetry, TELEMETRY_TOPICS
 
-from protocol import decode_routes, decode_status, encode_routes
+HEARTBEAT_TIMEOUT = 15.0
+TELEMETRY_TIMEOUT = 2.0
+STATIC_DIR = Path(__file__).resolve().parent / "web"
+
+
+class CommandUnavailable(Exception):
+    pass
 
 
 class Dashboard:
-    def __init__(self, broker, port, topic):
-        self.topic = topic.rstrip("/")
-        self.lock = threading.Lock()
-        self.connected = False
-        self.available = False
-        self.last_update = 0.0
-        self.status = None
-        self.routes = None
-        self.routes_version = None
-        self.pending = None
-        self.pending_at = 0.0
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-        if "MQTT_USERNAME" in os.environ:
-            self.client.username_pw_set(os.environ["MQTT_USERNAME"], os.environ.get("MQTT_PASSWORD"))
+    def __init__(self, broker, broker_port=1883, root="robot/mtk3smp-pico/v2", clock=time.monotonic):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]{0,53}", root):
+            raise ValueError("Topic root must be 1..54 ASCII letters, digits, /, _, - or .; no wildcards")
+        self.broker, self.broker_port, self.root = broker, broker_port, root
+        self.clock = clock
+        self.lock = threading.RLock()
+        self.client = None
+        self.broker_connected = False
+        self.monitor_ready = False
+        self.last_status = None
+        self.heartbeat_at = None
+        self.heartbeat_time = None
+        self.last_ack = None
+        self.last_command = None
+        self.error = ""
+        self.events = deque(maxlen=40)
+        self.sequence = 0
+        self.telemetry = {name: None for name in TELEMETRY_TOPICS}
+        self.motion_history = deque(maxlen=120)
+
+    def event(self, kind, message):
+        # Callers hold the reentrant lock, including callbacks and HTTP threads.
+        self.sequence += 1
+        self.events.appendleft({"id": self.sequence, "time": self.timestamp(),
+                                "kind": kind, "message": message})
+
+    @staticmethod
+    def timestamp():
+        return datetime.now(timezone.utc).isoformat()
+
+    def start(self, mqtt):
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                                  client_id="buddy1-dashboard-" + uuid.uuid4().hex[:10])
         self.client.on_connect = self.on_connect
+        self.client.on_connect_fail = self.on_connect_fail
         self.client.on_disconnect = self.on_disconnect
+        self.client.on_subscribe = self.on_subscribe
         self.client.on_message = self.on_message
-        self.client.reconnect_delay_set(1, 15)
-        self.client.connect_async(broker, port, 30)
+        self.client.reconnect_delay_set(min_delay=1, max_delay=10)
+        self.client.connect_async(self.broker, self.broker_port, 60)
+        self.client.loop_start()
 
-    def on_connect(self, client, _data, _flags, reason, _properties):
+    def close(self):
+        if self.client is not None:
+            self.client.disconnect()
+            self.client.loop_stop()
+
+    def on_connect(self, client, userdata, flags, reason, properties):
         with self.lock:
-            self.connected = not reason.is_failure
-        if not reason.is_failure:
-            client.subscribe([(self.topic + "/state", 0), (self.topic + "/online", 0),
-                              (self.topic + "/routes/state", 1)])
+            self.broker_connected = not reason.is_failure
+            self.monitor_ready = False
+            self.heartbeat_at = None
+            self.motion_history.clear()
+            for sample in self.telemetry.values():
+                if sample: sample['session_valid'] = False
+            if reason.is_failure:
+                self.error = "Broker rejected connection: " + str(reason)
+                self.event("error", self.error)
+                return
+            self.error = ""
+            self.event("connection", "Connected to MQTT broker")
+            result, _ = client.subscribe([(self.root + "/" + name, 0) for name in ("status", "ack", *TELEMETRY_TOPICS)])
+            if result != 0:
+                self.error = "Could not subscribe to Pico telemetry topics"
+                self.event("error", self.error)
 
-    def on_disconnect(self, _client, _data, _flags, _reason, _properties):
+    def on_connect_fail(self, client, userdata):
         with self.lock:
-            self.connected = False
-            self.available = False
+            self.broker_connected = self.monitor_ready = False
+            self.heartbeat_at = None
+            self.error = "Cannot reach broker. Check its IP, listener and firewall; retrying."
+            self.event("error", self.error)
 
-    def on_message(self, _client, _data, message):
-        try:
-            with self.lock:
-                suffix = message.topic[len(self.topic):]
-                if suffix == "/state":
-                    self.status = decode_status(message.payload)
-                    self.last_update = time.monotonic()
-                elif suffix == "/online":
-                    self.available = message.payload == b"\x01"
-                    if not self.available:
-                        self.last_update = 0.0
-                elif suffix == "/routes/state":
-                    self.routes = decode_routes(message.payload)
-                    self.routes_version = message.payload.hex()
-                    if self.pending == self.routes_version:
-                        self.pending = None
-        except ValueError:
-            return
+    def on_subscribe(self, client, userdata, mid, reasons, properties):
+        with self.lock:
+            self.monitor_ready = bool(reasons) and all(not reason.is_failure for reason in reasons)
+            if self.monitor_ready:
+                self.error = ""
+                self.event("connection", "Subscribed to Pico heartbeat, telemetry and acknowledgments")
+            else:
+                self.error = "Broker rejected a dashboard subscription"
+                self.event("error", self.error)
+
+    def on_disconnect(self, client, userdata, flags, reason, properties):
+        with self.lock:
+            self.broker_connected = self.monitor_ready = False
+            self.heartbeat_at = None
+            self.motion_history.clear()
+            for sample in self.telemetry.values():
+                if sample: sample['session_valid'] = False
+            self.error = "Broker disconnected; retrying."
+            self.event("connection", self.error)
+
+    def on_message(self, client, userdata, message):
+        payload = bytes(message.payload)
+        with self.lock:
+            if message.topic == self.root + "/status":
+                if len(payload) != 1 or payload[0] > 31:
+                    self.event("error", "Ignored malformed heartbeat")
+                    return
+                self.last_status = payload[0]
+                if message.retain:
+                    # Stored online status is not proof that the Pico is alive.
+                    self.event("status", "Stored status received; waiting for a live heartbeat")
+                else:
+                    self.heartbeat_at = self.clock()
+                    self.heartbeat_time = self.timestamp()
+                    self.event("heartbeat", "Live heartbeat " + payload.hex().upper())
+            elif message.topic == self.root + "/ack":
+                if len(payload) != 1 or payload[0] not in (0,1,2,3,4,6) or message.retain:
+                    self.event("error", "Ignored malformed or retained acknowledgment")
+                    return
+                self.last_ack = {"command": "reset" if payload[0] & 4 else "start" if payload[0] & 1 else "stop",
+                                 "rejected": bool(payload[0] & 2), "time": self.timestamp(),
+                                 "hex": payload.hex().upper()}
+                label = self.last_ack["command"].upper()
+                result = "rejected" if self.last_ack["rejected"] else "accepted"
+                self.event("ack", "Pico ACK: " + label + " " + result)
+            else:
+                prefix = self.root + "/"
+                if not message.topic.startswith(prefix): return
+                kind = message.topic[len(prefix):]
+                if kind not in self.telemetry: return
+                if message.retain:
+                    self.event("telemetry", "Ignored retained " + kind + " sample; waiting for live data")
+                    return
+                try:
+                    decoded = decode_telemetry(kind, payload)
+                except ValueError as exc:
+                    self.event("error", "Ignored malformed " + kind + " telemetry: " + str(exc))
+                    return
+                previous = self.telemetry[kind]
+                now = self.clock()
+                self.telemetry[kind] = dict(data=decoded, received_at=now,
+                                            time=self.timestamp(), session_valid=True)
+                if kind == "vehicle" and (previous is None or previous['data'] != decoded):
+                    self.event("vehicle", "Mission: " + decoded['state'] +
+                               (" · " + ", ".join(decoded['fault_labels']) if decoded['faults'] else ""))
+                if kind == "motion":
+                    self.motion_history.append(dict(left_rpm=decoded['left_rpm'],
+                                                    right_rpm=decoded['right_rpm']))
+                    if decoded['faults'] and (previous is None or previous['data']['faults'] != decoded['faults']):
+                        self.event("fault", "Motor: " + ", ".join(decoded['fault_labels']))
 
     def snapshot(self):
         with self.lock:
-            if self.pending is not None and time.monotonic() - self.pending_at > 10:
-                self.pending = None
+            age = None if self.heartbeat_at is None else max(0, self.clock() - self.heartbeat_at)
+            fresh = age is not None and age <= HEARTBEAT_TIMEOUT
+            flags = self.last_status or 0
+            ready = self.broker_connected and self.monitor_ready and fresh and flags & 7 == 7
+            controller = self.telemetry.get('controller')
+            controller_live = bool(controller and controller['session_valid'] and self.broker_connected and
+                                   self.clock()-controller['received_at']<=TELEMETRY_TIMEOUT)
+            if controller_live and controller['data']['start_block']:
+                ready = False
             return {
-                "broker": self.connected,
-                "online": self.is_online(),
-                "status": self.status,
-                "routes": self.routes,
-                "route_version": self.routes_version,
-                "pending": self.pending,
+                "broker": self.broker, "broker_port": self.broker_port, "root": self.root,
+                "broker_connected": self.broker_connected, "monitor_ready": self.monitor_ready,
+                "error": self.error, "start_allowed": bool(ready),
+                "stop_allowed": self.broker_connected,
+                "reset_allowed": bool(controller_live and fresh and flags & 7 == 7 and
+                                      controller['data']['reset_supported'] and
+                                      controller['data']['motor_faults'] and not controller['data']['reset_pending'] and
+                                      controller['data']['state'] in ('IDLE','FAULT') and
+                                      self.telemetry['motion'] and self.telemetry['motion']['session_valid'] and
+                                      self.clock()-self.telemetry['motion']['received_at']<=TELEMETRY_TIMEOUT and
+                                      self.telemetry['motion']['data']['mode']==0),
+                "pico": {"fresh": fresh, "age": age, "time": self.heartbeat_time,
+                         "hex": None if self.last_status is None else f"{flags:02X}",
+                         "wifi": bool(flags & 1), "mqtt": bool(flags & 2),
+                         "subscribed": bool(flags & 4), "tx_drop": bool(flags & 8),
+                         "rx_drop": bool(flags & 16)},
+                "telemetry": {
+                    name: {"data": sample['data'] if sample else None,
+                           "age": max(0, self.clock() - sample['received_at']) if sample else None,
+                           "time": sample['time'] if sample else None,
+                           "fresh": bool(sample and sample['session_valid'] and self.broker_connected and
+                                         self.monitor_ready and self.clock() - sample['received_at'] <= TELEMETRY_TIMEOUT)}
+                    for name, sample in self.telemetry.items()
+                },
+                "motion_history": list(self.motion_history),
+                "last_ack": self.last_ack, "last_command": self.last_command,
+                "events": list(self.events),
             }
 
-    def is_online(self):
-        return self.connected and self.available and time.monotonic() - self.last_update <= 8
-
-    def send_stop(self):
+    def send(self, command):
+        payload = command_payload(command)  # Only exact START/STOP/RESET; never arbitrary topics/payloads.
         with self.lock:
-            if not self.is_online():
-                return 503, {"error": "Wait for fresh telemetry."}
-            result = self.client.publish(self.topic + "/command", b"\x01", qos=1)
-        if result.rc != mqtt.MQTT_ERR_SUCCESS:
-            return 503, {"error": "Could not queue the stop request."}
-        return 202, {"message": "Stop requested. Check the vehicle state for confirmation."}
-
-    def save_routes(self, body):
-        if not isinstance(body, dict):
-            return 400, {"error": "Invalid route document."}
-        try:
-            payload = encode_routes(body.get("routes"))
-        except ValueError as error:
-            return 400, {"error": str(error)}
-        with self.lock:
-            if not self.is_online() or self.routes_version is None:
-                return 503, {"error": "Wait for the car's current route table."}
-            if body.get("version") != self.routes_version:
-                return 409, {"error": "The car's route table changed. Reload the mapping and retry."}
-            if payload.hex() == self.routes_version:
-                return 200, {"message": "Mapping already active."}
-            if self.pending is not None:
-                return 409, {"error": "The car is still confirming the previous update."}
-            result = self.client.publish(self.topic + "/routes/set", payload, qos=1, retain=True)
-            if result.rc != mqtt.MQTT_ERR_SUCCESS:
-                return 503, {"error": "Could not queue the mapping."}
-            self.pending = payload.hex()
-            self.pending_at = time.monotonic()
-        return 202, {"message": "Waiting for the car to confirm the mapping."}
+            state = self.snapshot()
+            if self.client is None or not state["broker_connected"]:
+                raise CommandUnavailable("Broker is disconnected. No command was queued.")
+            if command == "start" and not state["start_allowed"]:
+                raise CommandUnavailable("Wait for a live Pico heartbeat with all connection flags ready.")
+            if command == "reset" and not state["reset_allowed"]:
+                raise CommandUnavailable("Reset requires fresh stopped-motor diagnostics and a latched motor fault.")
+            result = self.client.publish(self.root + "/command", payload, qos=0, retain=False)
+            if result.rc != 0:
+                raise CommandUnavailable("MQTT did not queue the command; check the broker connection.")
+            self.last_command = {"command": command, "hex": payload.hex().upper(),
+                                 "time": self.timestamp()}
+            self.event("command", command.upper() + " queued for broker (" + payload.hex().upper() + ")")
+            return self.last_command.copy()
 
 
-def handler_for(dashboard):
-    page = Path(__file__).with_name("index.html").read_bytes()
+class DashboardServer(ThreadingHTTPServer):
+    daemon_threads = True
 
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, _format, *_args):
+    def __init__(self, address, dashboard):
+        self.dashboard = dashboard
+        self.csrf = secrets.token_urlsafe(24)
+        super().__init__(address, DashboardHandler)
+
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # HTTP polling noise is not useful; MQTT events are visible in the dashboard.
+
+    def local_request(self):
+        port = self.server.server_port
+        hosts = (f"localhost:{port}", f"127.0.0.1:{port}")
+        if self.headers.get("Host", "") not in hosts:
+            self.json_response(403, {"error": "Use the local dashboard address"})
+            return False
+        origin = self.headers.get("Origin")
+        if origin and origin not in tuple("http://" + host for host in hosts):
+            self.json_response(403, {"error": "Cross-origin requests are not allowed"})
+            return False
+        return True
+
+    def headers_for(self, status, content_type, length):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+        self.end_headers()
+
+    def json_response(self, status, data):
+        body = json.dumps(data).encode("utf-8")
+        self.headers_for(status, "application/json; charset=utf-8", len(body))
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if not self.local_request():
             return
+        path = urlsplit(self.path).path
+        if path == "/api/state":
+            state = self.server.dashboard.snapshot()
+            state["csrf"] = self.server.csrf
+            self.json_response(200, state)
+            return
+        files = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
+                 "/styles.css": ("styles.css", "text/css")}
+        if path not in files:
+            self.json_response(404, {"error": "Not found"})
+            return
+        name, content_type = files[path]
+        body = (STATIC_DIR / name).read_bytes()
+        self.headers_for(200, content_type + "; charset=utf-8", len(body))
+        self.wfile.write(body)
 
-        def reply(self, status, media_type, body):
-            self.send_response(status)
-            self.send_header("Content-Type", media_type)
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
-            self.wfile.write(body)
+    def do_POST(self):
+        if not self.local_request():
+            return
+        if urlsplit(self.path).path != "/api/command":
+            self.json_response(404, {"error": "Not found"})
+            return
+        if not hmac.compare_digest(self.headers.get("X-Dashboard-Token", "").encode("utf-8"), self.server.csrf.encode("ascii")):
+            self.json_response(403, {"error": "Reload the dashboard before sending commands"})
+            return
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+            self.json_response(415, {"error": "Expected JSON"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 128:
+                raise ValueError("Invalid command size")
+            self.connection.settimeout(5)
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict) or set(data) != {"command"} or data["command"] not in ("start", "stop", "reset"):
+                raise ValueError("Command must be start, stop or reset")
+            result = self.server.dashboard.send(data["command"])
+        except CommandUnavailable as exc:
+            self.json_response(503, {"error": str(exc)})
+        except (ValueError, TypeError, TimeoutError) as exc:
+            self.json_response(400, {"error": str(exc)})
+        else:
+            self.json_response(200, {"queued": True, **result})
 
-        def json_reply(self, status, data):
-            self.reply(status, "application/json", json.dumps(data).encode())
 
-        def do_GET(self):
-            if self.path == "/":
-                self.reply(200, "text/html; charset=utf-8", page)
-            elif self.path == "/api/status":
-                self.json_reply(200, dashboard.snapshot())
-            else:
-                self.json_reply(404, {"error": "Unknown endpoint."})
+def port_number(text):
+    value = int(text)
+    if not 1 <= value <= 65535:
+        raise argparse.ArgumentTypeError("port must be 1..65535")
+    return value
 
-        def do_POST(self):
-            if self.headers.get_content_type() != "application/json":
-                self.json_reply(415, {"error": "Expected application/json."})
-                return
-            try:
-                size = int(self.headers.get("Content-Length", "0"))
-                if not 0 < size <= 2048:
-                    raise ValueError
-                body = json.loads(self.rfile.read(size))
-            except (ValueError, UnicodeDecodeError):
-                self.json_reply(400, {"error": "Invalid JSON payload."})
-                return
-            if self.path == "/api/routes":
-                self.json_reply(*dashboard.save_routes(body))
-            elif self.path == "/api/stop":
-                self.json_reply(*dashboard.send_stop())
-            else:
-                self.json_reply(404, {"error": "Unknown endpoint."})
 
-    return Handler
+def ipv4_address(text):
+    try:
+        return str(ipaddress.IPv4Address(text))
+    except ipaddress.AddressValueError:
+        raise argparse.ArgumentTypeError("Enter the actual broker IPv4 address, such as 192.168.1.10") from None
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--broker", required=True)
-    parser.add_argument("--mqtt-port", type=int, default=1883)
-    parser.add_argument("--topic", default="robot/se09-car/v3")
-    parser.add_argument("--http-port", type=int, default=8080)
-    options = parser.parse_args()
-
-    dashboard = Dashboard(options.broker, options.mqtt_port, options.topic)
-    dashboard.client.loop_start()
+    parser.add_argument("broker", nargs="?", type=ipv4_address, help="same broker IPv4 address as config/wifi_secrets.h; prompted if omitted")
+    parser.add_argument("--broker-port", type=port_number, default=1883)
+    parser.add_argument("--root", default="robot/mtk3smp-pico/v2")
+    parser.add_argument("--port", type=port_number, default=8080, help="local browser port")
+    args = parser.parse_args()
     try:
-        with ThreadingHTTPServer(("127.0.0.1", options.http_port), handler_for(dashboard)) as server:
-            print(f"Car dashboard running at http://127.0.0.1:{options.http_port}", flush=True)
-            server.serve_forever()
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        parser.exit(1, "Install the dashboard dependency in your venv:\npython3 -m pip install -r requirements.txt\n")
+    while args.broker is None:
+        try:
+            args.broker = ipv4_address(input("Enter your broker IPv4 address (same as the Pico): ").strip())
+        except argparse.ArgumentTypeError as exc:
+            print(exc)
+        except (EOFError, KeyboardInterrupt):
+            parser.exit(1, "\nBroker address required. Pass it after app.py.\n")
+    try:
+        dashboard = Dashboard(args.broker, args.broker_port, args.root)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        server = DashboardServer(("127.0.0.1", args.port), dashboard)
+    except OSError as exc:
+        parser.exit(1, f"Cannot start local dashboard: {exc}. Try --port 8081.\n")
+    try:
+        dashboard.start(mqtt)
+        print(f"Open http://localhost:{server.server_port} in your browser.", flush=True)
+        print(f"Broker: {args.broker}:{args.broker_port} | Topics: {args.root}/...", flush=True)
+        print("Send STOP before closing if motion is active. Ctrl+C closes this dashboard.", flush=True)
+        server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass
     finally:
-        dashboard.client.disconnect()
-        dashboard.client.loop_stop()
+        dashboard.close()
+        server.server_close()
 
 
 if __name__ == "__main__":
