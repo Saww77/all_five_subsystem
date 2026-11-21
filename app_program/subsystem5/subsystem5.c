@@ -268,6 +268,24 @@ static BOOL setup(void)
 }
 
 #if !APP_S5_BENCH
+static unsigned check_return_path(S5_SIDE bypass_side, uint32_t request)
+{
+    _Static_assert(S5_RETURN_INNER_BEARING % S5_FINE_STEP == 0 &&
+                   S5_RETURN_OUTER_BEARING % S5_FINE_STEP == 0 &&
+                   S5_RETURN_OUTER_BEARING <= S5_MAX_ANGLE - S5_CENTRE_ANGLE,
+                   "Return bearings must be covered on both sides of the servo sweep");
+    /* From the left bypass the tape is to the right, and vice versa. */
+    int direction = bypass_side == S5_LEFT ? 1 : -1;
+    unsigned inner_index = (unsigned)((int)S5_CENTRE_INDEX + direction * (int)(S5_RETURN_INNER_BEARING / S5_FINE_STEP));
+    unsigned outer_index = (unsigned)((int)S5_CENTRE_INDEX + direction * (int)(S5_RETURN_OUTER_BEARING / S5_FINE_STEP));
+    unsigned inner = read_at(inner_index, FALSE, true, S5_UNKNOWN_RANGE);
+    unsigned outer = S5_UNKNOWN_RANGE;
+    if (vehicle_obstacle_scan_current(request))
+        outer = read_at(outer_index, FALSE, true, S5_UNKNOWN_RANGE);
+    aim(S5_CENTRE_ANGLE);
+    return s5_return_clearance_mm(inner, outer);
+}
+
 static void scan_task(INT stacd, void *exinf)
 {
     (void)stacd;
@@ -284,10 +302,16 @@ static void scan_task(INT stacd, void *exinf)
         ER wake = tk_wai_flg(scan_event, SCAN_WAKE, TWF_ORW | TWF_BITCLR, &events, PING_INTERVAL_MS);
 
         uint32_t request;
-        if (wake == E_OK && vehicle_obstacle_scan_request(&request)) {
-            S5_PROFILE profile;
-            BOOL scanned = scan_obstacle(&profile, FALSE, &request);
-            vehicle_finish_obstacle_scan(scanned ? &profile : NULL, request);
+        S5_SIDE check_side;
+        if (wake == E_OK && vehicle_obstacle_scan_request(&request, &check_side)) {
+            if (check_side != S5_NO_SIDE) {
+                unsigned clearance = check_return_path(check_side, request);
+                vehicle_finish_obstacle_return_check(clearance, request);
+            } else {
+                S5_PROFILE profile;
+                BOOL scanned = scan_obstacle(&profile, FALSE, &request);
+                vehicle_finish_obstacle_scan(scanned ? &profile : NULL, request);
+            }
             /* The sweep finishes with a forward ping. */
             tk_dly_tsk(PING_INTERVAL_MS);
         } else if (wake != E_TMOUT) {

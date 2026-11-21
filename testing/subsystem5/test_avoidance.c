@@ -1,5 +1,6 @@
 /* Host tests for the production controller and planner. */
 #include "../../app_program/vehicle_controller/vehicle_core.h"
+#include "../../app_program/subsystem2/motion_config.h"
 #include <assert.h>
 #include <stdio.h>
 
@@ -63,6 +64,10 @@ static void start_move(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out,
 {
     in->avoidance.motion = S5_MOTION_NONE;
     step(model, in, out, 260);
+    if (out->maneuver.action != action || out->maneuver.distance_mm != travel)
+        fprintf(stderr, "phase=%u range=%u motion=%u/%u expected=%u/%u\n",
+                model->avoidance.phase, in->avoidance.range_mm, out->maneuver.action,
+                out->maneuver.distance_mm, action, travel);
     assert(out->maneuver.action == action && out->maneuver.distance_mm == travel);
     in->avoidance.motion = S5_MOTION_PENDING;
 }
@@ -72,6 +77,17 @@ static void end_move(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out)
     in->avoidance.motion = S5_MOTION_DONE;
     step(model, in, out, 500);
     in->avoidance.motion = S5_MOTION_NONE;
+}
+
+static void return_check(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out, unsigned clearance)
+{
+    assert(model->avoidance.phase == S5_VERIFY_RETURN);
+    in->avoidance.return_received = true;
+    in->avoidance.return_at = in->avoidance.now + 20;
+    in->avoidance.return_clear_mm = clearance;
+    step(model, in, out, 20);
+    assert(out->maneuver.action == S5_WAIT || out->maneuver.action == S5_STOP);
+    in->avoidance.return_received = false;
 }
 
 static void reach_inward_turn(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out, bool left, bool open_side)
@@ -102,8 +118,9 @@ static void reach_inward_turn(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out, boo
     end_move(model, in, out);
     start_move(model, in, out, inward, 0);
     end_move(model, in, out);
-    start_move(model, in, out, S5_ADVANCE, 350);
+    start_move(model, in, out, S5_ADVANCE, S5_SCAN_STOP_MM + 130);
     end_move(model, in, out);
+    return_check(model, in, out, S5_OPEN_RANGE);
     start_move(model, in, out, inward, 0);
     end_move(model, in, out);
     assert(model->state == VC_RECOVER_LINE && model->avoidance.phase == S5_FIND_LINE);
@@ -118,7 +135,7 @@ static void test_rejoin(bool left, bool retry, bool open_side)
     S5_ACTION outward = left ? S5_PIVOT_LEFT : S5_PIVOT_RIGHT;
     S5_ACTION inward = left ? S5_PIVOT_RIGHT : S5_PIVOT_LEFT;
     if (retry) {
-        in.avoidance.range_mm = 240;
+        in.avoidance.range_mm = S5_SCAN_STOP_MM + 20;
         step(&model, &in, &out, 260);
         assert(out.maneuver.action == S5_WAIT && model.avoidance.phase == S5_ALIGN_RETRY);
         start_move(&model, &in, &out, outward, 0);
@@ -126,6 +143,7 @@ static void test_rejoin(bool left, bool retry, bool open_side)
         in.avoidance.range_mm = 1000;
         start_move(&model, &in, &out, S5_ADVANCE, 60);
         end_move(&model, &in, &out);
+        return_check(&model, &in, &out, S5_OPEN_RANGE);
         start_move(&model, &in, &out, inward, 0);
         end_move(&model, &in, &out);
     }
@@ -258,7 +276,7 @@ static void test_reentry_limit(void)
     S5_AVOID model = {.phase = S5_FIND_LINE, .side = S5_LEFT,
                      .offset_mm = 185, .passed_mm = S5_MAX_PASS_MM};
     S5_AVOID_INPUT in = {.now = 300, .range_at = 300, .stopped = true,
-                         .range_valid = true, .range_mm = 240};
+                         .range_valid = true, .range_mm = S5_SCAN_STOP_MM + 20};
     S5_AVOID_OUTPUT out = s5_avoid_step(&model, &in);
     assert(out.action == S5_STOP && model.phase == S5_FAILED);
 }
@@ -268,7 +286,7 @@ static void test_width_and_side_clearance(void)
     S5_PROFILE scan = obstacle(true);
     S5_BYPASS plan = s5_plan_bypass(&scan);
     assert(plan.side == S5_LEFT);
-    assert(plan.offset_mm == 185 && plan.pass_mm == 350);
+    assert(plan.offset_mm == 185 && plan.pass_mm == S5_SCAN_STOP_MM + 130);
     assert(s5_reentry_detection_mm(plan.offset_mm, 60) == 85);
     scan.left_path_mm = scan.right_path_mm; /* Equal clearance defaults to T. */
     assert(s5_plan_bypass(&scan).side == S5_LEFT);
@@ -302,12 +320,12 @@ static void test_bypass_with_estimated_edges(void)
 
     S5_BYPASS plan = s5_plan_bypass(&scan);
     assert(plan.side == S5_RIGHT && plan.failure == S5_FAIL_NONE);
-    assert(plan.offset_mm == 188 && plan.pass_mm == 350);
+    assert(plan.offset_mm == 188 && plan.pass_mm == S5_SCAN_STOP_MM + 130);
 
     scan.left_path_mm = S5_OPEN_RANGE;
     scan.right_path_mm = S5_UNKNOWN_RANGE;
     plan = s5_plan_bypass(&scan);
-    assert(plan.side == S5_LEFT && plan.offset_mm == 195 && plan.pass_mm == 350);
+    assert(plan.side == S5_LEFT && plan.offset_mm == 195 && plan.pass_mm == S5_SCAN_STOP_MM + 130);
 
     scan.left_path_mm = 150;
     scan.right_path_mm = 188 + 15 + S5_MANEUVER_STOP_MM - 1;
@@ -416,9 +434,10 @@ static void test_lateral_bypass_at_start(void)
     VC_MODEL blocked = model;
     VC_INPUT near = in;
     near.avoidance.range_mm = 300;
-    start_move(&blocked, &near, &out, S5_ADVANCE, 81);
+    unsigned clear_advance = near.avoidance.range_mm - S5_SCAN_STOP_MM + 1u;
+    start_move(&blocked, &near, &out, S5_ADVANCE, clear_advance);
     end_move(&blocked, &near, &out);
-    assert(blocked.avoidance.phase == S5_SHIFT_OUT && blocked.avoidance.leg_progress_mm == 81);
+    assert(blocked.avoidance.phase == S5_SHIFT_OUT && blocked.avoidance.leg_progress_mm == clear_advance);
     near.avoidance.range_mm = 219;
     step(&blocked, &near, &out, 260);
     assert(out.stop && blocked.avoidance.phase == S5_PROFILE_PATH && blocked.avoidance.depth == 1);
@@ -430,8 +449,11 @@ static void test_lateral_bypass_at_start(void)
     end_move(&model, &in, &out);
     start_move(&model, &in, &out, S5_ADVANCE, 348);
     end_move(&model, &in, &out);
+    return_check(&model, &in, &out, S5_OPEN_RANGE);
+    in.avoidance.range_mm = 200; /* Enough to pivot, too little room to roll inward. */
     start_move(&model, &in, &out, S5_PIVOT_LEFT, 0);
     end_move(&model, &in, &out);
+    in.avoidance.range_mm = 1000;
     start_move(&model, &in, &out, S5_ADVANCE, 409);
 }
 
@@ -607,7 +629,8 @@ static void test_obstacle_during_pass(void)
     assert(model.avoidance.offset_mm == 185 && model.avoidance.leg_progress_mm == 300);
     start_move(&model, &in, &out, S5_ADVANCE, 50);
     end_move(&model, &in, &out);
-    assert(model.avoidance.phase == S5_TURN_IN && model.avoidance.passed_mm == 350);
+    assert(model.avoidance.phase == S5_VERIFY_RETURN && model.avoidance.passed_mm == 350);
+    return_check(&model, &in, &out, S5_OPEN_RANGE);
     start_move(&model, &in, &out, S5_PIVOT_RIGHT, 0);
 }
 
@@ -715,6 +738,79 @@ static void test_reverse_and_rescan(bool path_clears)
     assert(model.state == VC_FOLLOW_LINE && model.avoidance.phase == S5_COMPLETE);
 }
 
+static void test_rounded_bypass(bool left)
+{
+    VC_MODEL model = {0};
+    VC_INPUT in = track_input();
+    VC_OUTPUT out;
+    S5_PROFILE scan = obstacle(left);
+    scan.left_edge_mm = -100;
+    scan.right_edge_mm = 100;
+    unsigned offset = s5_plan_bypass(&scan).offset_mm;
+    unsigned arc_credit = 2u * S2_ARC_RADIUS_MM;
+    profile(&model, &in, &out, scan);
+    assert(model.avoidance.rounded_exit);
+    S5_ACTION outward = left ? S5_ARC_LEFT : S5_ARC_RIGHT;
+    S5_ACTION inward = left ? S5_ARC_RIGHT : S5_ARC_LEFT;
+    start_move(&model, &in, &out, outward, 0);
+    end_move(&model, &in, &out);
+    in.avoidance.range_mm = S5_OPEN_RANGE;
+    in.obstacle_blocked = false;
+    start_move(&model, &in, &out, S5_ADVANCE, offset - arc_credit);
+    end_move(&model, &in, &out);
+    start_move(&model, &in, &out, inward, 0);
+    end_move(&model, &in, &out);
+    start_move(&model, &in, &out, S5_ADVANCE, S5_SCAN_STOP_MM + 130 - arc_credit);
+    end_move(&model, &in, &out);
+
+    in.avoidance.return_received = true;
+    in.avoidance.return_at = in.avoidance.now - 1u;
+    in.avoidance.return_clear_mm = S5_OPEN_RANGE;
+    step(&model, &in, &out, 20);
+    assert(model.avoidance.phase == S5_VERIFY_RETURN && out.maneuver.action == S5_WAIT);
+    return_check(&model, &in, &out, 110);
+    assert(model.avoidance.phase == S5_PASS);
+    start_move(&model, &in, &out, S5_ADVANCE, 60);
+    end_move(&model, &in, &out);
+    return_check(&model, &in, &out, S5_OPEN_RANGE);
+    in.avoidance.range_valid = false;
+    step(&model, &in, &out, 260);
+    assert(model.avoidance.phase == S5_TURN_IN && out.maneuver.action == S5_WAIT);
+    in.avoidance.range_valid = true;
+    start_move(&model, &in, &out, inward, 0);
+    end_move(&model, &in, &out);
+    assert(s5_return_tape_distance_mm(&model.avoidance) == offset - S2_ARC_RADIUS_MM);
+    start_move(&model, &in, &out, S5_ADVANCE, offset - S2_ARC_RADIUS_MM + S5_SEARCH_MARGIN_MM);
+    in.avoidance.near_original_line = true;
+    in.avoidance.line_hit = true;
+    for (unsigned i = 0; i < 2; ++i) {
+        in.avoidance.line_at = in.avoidance.now + 20;
+        step(&model, &in, &out, 20);
+    }
+    assert(model.avoidance.phase == S5_CENTER_LINE && out.maneuver.action == S5_STOP);
+}
+
+static void test_return_and_arc_interlocks(void)
+{
+    assert(s5_return_clearance_mm(200, 300) == 141);
+    assert(s5_return_clearance_mm(S5_OPEN_RANGE, 300) == 259);
+    assert(s5_return_clearance_mm(S5_OPEN_RANGE, S5_UNKNOWN_RANGE) == S5_UNKNOWN_RANGE);
+    S5_AVOID state = {.side = S5_LEFT, .phase = S5_VERIFY_RETURN, .phase_at = 100,
+                      .offset_mm = 225, .passed_mm = S5_MAX_PASS_MM};
+    S5_AVOID_INPUT in = {.now = 200, .return_at = 190, .stopped = true,
+                        .return_received = true, .return_clear_mm = 110};
+    assert(s5_avoid_step(&state, &in).action == S5_STOP && state.failure == S5_FAIL_CLOSE);
+    state = (S5_AVOID){.phase = S5_VERIFY_RETURN, .phase_at = 100, .offset_mm = 225};
+    in.return_clear_mm = S5_UNKNOWN_RANGE;
+    assert(s5_avoid_step(&state, &in).action == S5_STOP && state.failure == S5_FAIL_ECHO);
+    state = (S5_AVOID){.phase = S5_TURN_OUT, .side = S5_LEFT, .rounded_exit = true};
+    in.range_valid = true;
+    in.range_at = in.now = 500;
+    in.range_mm = S5_MANEUVER_STOP_MM;
+    in.motion = S5_MOTION_PENDING;
+    assert(s5_avoid_step(&state, &in).action == S5_STOP && state.failure == S5_FAIL_CLOSE);
+}
+
 int main(void)
 {
     test_rejoin(true, false, false);
@@ -741,5 +837,8 @@ int main(void)
     test_next_obstacle_on_return();
     test_reverse_and_rescan(true);
     test_reverse_and_rescan(false);
+    test_rounded_bypass(true);
+    test_rounded_bypass(false);
+    test_return_and_arc_interlocks();
     puts("PASS default left pivot, post-turn range, nested bypass, line recovery and cancellation");
 }

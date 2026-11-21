@@ -89,6 +89,12 @@ bool motion_maneuver_reverse(unsigned distance_mm,uint16_t *command)
     return distance_mm && distance_mm<=MAX_DISTANCE_MM &&
            submit_maneuver(S2_MANEUVER_REVERSE_BASE+distance_mm,command);
 }
+bool motion_arc(bool right,uint16_t *command)
+{
+    if(!command || !submit(S2_ARC,right))return false;
+    *command=(uint16_t)(S2_ARC|((unsigned)right<<4));
+    return true;
+}
 bool motion_move_forward_mm(unsigned n){return n<=MAX_DISTANCE_MM && (n?submit(S2_MOVE_F,n):motion_ready());}
 bool motion_move_backward_mm(unsigned n){return n<=MAX_DISTANCE_MM && (n?submit(S2_MOVE_B,n):motion_ready());}
 bool motion_turn_left(unsigned n){return n>=1&&n<=8&&submit(S2_LEFT,n-1);}

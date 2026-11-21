@@ -2,6 +2,7 @@
 #include "../subsystem2/subsystem2.h"
 #include "../subsystem2/motion_core.h"
 #include "../subsystem2/motion_config.h"
+#include "../subsystem2/motion_transport.h"
 #include "../subsystem1/s1_comm.h"
 #include "../subsystem3/subsystem3.h"
 #include "../subsystem5/subsystem5.h"
@@ -30,12 +31,14 @@ static VEHICLE_SNAPSHOT data;
 static VC_MODEL model;
 static struct {
     unsigned start:1, stop:1, line_stop:1, auto_start:1, reset:1;
-    unsigned obstacle_monitor:1, profile_valid:1, scan:2, echo_quiet:1;
+    unsigned obstacle_monitor:1, profile_valid:1, scan:2, echo_quiet:1, return_received:1;
 } pending;
 static uint32_t reset_started, reset_refreshed;
 static S5_RANGE_GATE obstacle_range;
 static uint32_t obstacle_range_at, full_profile_at, scan_request_id;
 static S5_PROFILE full_profile;
+static uint32_t return_at;
+static unsigned return_clear_mm;
 
 static bool line_hit(void)
 {
@@ -147,6 +150,8 @@ static VC_INPUT controller_input(BOOL ready, BOOL linked, unsigned faults, bool 
             .range_valid = range_valid(now), .profile_at = full_profile_at,
             .echo_quiet = pending.echo_quiet && now - obstacle_range_at <= S5_RANGE_MAX_AGE_MS,
             .profile = full_profile, .profile_valid = pending.profile_valid,
+            .return_at = return_at, .return_clear_mm = return_clear_mm,
+            .return_received = pending.return_received,
             .line_at = data.line_timestamp_ms, .line_hit = line_hit(),
             .line_junction = data.l >= S5_WIDE_MARKING && data.r >= S5_WIDE_MARKING,
             .sensor_to_axle_mm = S5_IR_TO_AXLE_MM,
@@ -229,16 +234,19 @@ void vehicle_submit_obstacle_ping(S5_PING ping)
 
 static BOOL scan_wanted(void)
 {
-    return model.avoidance.phase == S5_PROFILE_PATH && !pending.profile_valid &&
-           !pending.stop && !pending.line_stop;
+    bool profile = model.avoidance.phase == S5_PROFILE_PATH && !pending.profile_valid;
+    bool return_check = model.avoidance.phase == S5_VERIFY_RETURN && !pending.return_received;
+    return (profile || return_check) && !pending.stop && !pending.line_stop;
 }
 
-BOOL vehicle_obstacle_scan_request(uint32_t *request)
+BOOL vehicle_obstacle_scan_request(uint32_t *request, S5_SIDE *check_side)
 {
     if (!request || !lock()) return FALSE;
     BOOL allowed = scan_wanted() && pending.scan == SCAN_READY;
     if (allowed) {
         *request = scan_request_id;
+        if (check_side)
+            *check_side = model.avoidance.phase == S5_VERIFY_RETURN ? model.avoidance.side : S5_NO_SIDE;
         pending.scan = SCAN_ACTIVE;
     }
     unlock();
@@ -256,7 +264,8 @@ BOOL vehicle_obstacle_scan_current(uint32_t request)
 void vehicle_finish_obstacle_scan(const S5_PROFILE *profile, uint32_t request)
 {
     if (!lock()) return;
-    BOOL current = scan_wanted() && pending.scan == SCAN_ACTIVE && scan_request_id == request;
+    BOOL current = scan_wanted() && model.avoidance.phase == S5_PROFILE_PATH &&
+                   pending.scan == SCAN_ACTIVE && scan_request_id == request;
     if (current) {
         uint32_t now = now_ms();
         pending.scan = SCAN_OFF;
@@ -272,6 +281,20 @@ void vehicle_finish_obstacle_scan(const S5_PROFILE *profile, uint32_t request)
         full_profile = profile ? *profile : (S5_PROFILE){.nearest_mm = S5_UNKNOWN_RANGE};
         full_profile_at = now;
         pending.profile_valid = true;
+    }
+    unlock();
+    if (current) vehicle_notify_feedback();
+}
+void vehicle_finish_obstacle_return_check(unsigned clear_mm, uint32_t request)
+{
+    if (!lock()) return;
+    BOOL current = scan_wanted() && model.avoidance.phase == S5_VERIFY_RETURN &&
+                   pending.scan == SCAN_ACTIVE && scan_request_id == request;
+    if (current) {
+        pending.scan = SCAN_OFF;
+        pending.return_received = true;
+        return_at = now_ms();
+        return_clear_mm = clear_mm;
     }
     unlock();
     if (current) vehicle_notify_feedback();
@@ -331,6 +354,8 @@ static S5_MOTION drive_feedback(const S2_STATUS *status, const S2_REPLY *reply,
     }
     if (!matched || !reply->accepted) return S5_MOTION_FAILED;
     if (busy) return S5_MOTION_PENDING;
+    if ((drive.command & 15u) == S2_ARC)
+        return s2_core_arc_finished((drive.command >> 4) != 0, status) ? S5_MOTION_DONE : S5_MOTION_FAILED;
     return s2_core_maneuver_finished(drive.command >> 4, status) ? S5_MOTION_DONE : S5_MOTION_FAILED;
 }
 
@@ -355,6 +380,8 @@ static void submit_output(const VC_INPUT *in, const VC_OUTPUT *out, const S2_REP
             submitted = motion_maneuver_reverse(out->maneuver.distance_mm, &drive.command);
         else if (action == S5_ADVANCE)
             submitted = motion_maneuver(out->maneuver.distance_mm, false, &drive.command);
+        else if (action == S5_ARC_LEFT || action == S5_ARC_RIGHT)
+            submitted = motion_arc(action == S5_ARC_RIGHT, &drive.command);
         else
             submitted = motion_maneuver(0, action == S5_PIVOT_RIGHT, &drive.command);
         drive.velocity = false;
@@ -393,6 +420,7 @@ static const char *const avoidance_phase_name[] = {
     [S5_CHECK_LINE] = "checking line and forward range",
     [S5_BACK_UP] = "reversing for another scan",
     [S5_WAIT_PATH] = "waiting to verify a route",
+    [S5_VERIFY_RETURN] = "checking for clearance behind obstacle",
 };
 
 static TMO vehicle_service_once(void)
@@ -422,7 +450,8 @@ static TMO vehicle_service_once(void)
                                 data.l < S5_LINE_DARK && data.r < S5_LINE_DARK;
     if (model.avoidance.phase == S5_FIND_LINE && !model.avoidance.depth &&
         (in.avoidance.motion == S5_MOTION_PENDING || in.avoidance.motion == S5_MOTION_DONE)) {
-        unsigned min_cross_mm = s5_reentry_detection_mm(model.avoidance.offset_mm, S5_IR_TO_AXLE_MM);
+        unsigned min_cross_mm = s5_reentry_detection_mm(s5_return_tape_distance_mm(&model.avoidance),
+                                                        S5_IR_TO_AXLE_MM);
         unsigned progress_mm = model.avoidance.leg_progress_mm;
         in.avoidance.near_original_line = progress_mm >= min_cross_mm ||
                                        s2_core_distance_reached(min_cross_mm - progress_mm, &status);
@@ -470,12 +499,14 @@ static TMO vehicle_service_once(void)
     unsigned offset = model.avoidance.offset_mm;
     unsigned pass = model.avoidance.next_pass_mm;
     unsigned depth = model.avoidance.depth;
+    bool rounded = model.avoidance.rounded_exit;
     /* Serialize dispatch with the request latch, so STOP can cancel an entire
        batch before any later movement is submitted. */
     submit_output(&in, &out, &reply, vc_core_detouring(&model));
     if (phase != previous || out.maneuver.action == S5_RESCAN) {
         pending.scan = SCAN_OFF;
         if (phase == S5_PROFILE_PATH) pending.profile_valid = false;
+        pending.return_received = false;
     }
     if (phase == S5_PROFILE_PATH && previous != S5_PROFILE_PATH && previous != S5_BACK_UP &&
         previous != S5_WAIT_PATH && data.obstacle_profile) {
@@ -509,13 +540,18 @@ static TMO vehicle_service_once(void)
         tm_printf((UB*)"[S5] scan inconclusive, retrying while stopped\n");
     if (previous_depth < depth)
         tm_printf((UB*)"[S5] new obstacle on detour, scanning from the interrupted leg\n");
+    if (!dispatch_failed && (out.maneuver.action == S5_ARC_LEFT || out.maneuver.action == S5_ARC_RIGHT))
+        tm_printf((UB*)"[S5] rolling turn %s\n", out.maneuver.action == S5_ARC_LEFT ? "left" : "right");
+    if (previous == S5_VERIFY_RETURN && phase == S5_PASS && in.avoidance.return_received)
+        tm_printf((UB*)"[S5] return corridor obstructed at %u mm lateral, passing %u mm farther\n",
+                  (unsigned)in.avoidance.return_clear_mm, pass);
     if (previous != phase) {
         tm_printf((UB*)"[S5] avoidance phase=%u side=%u at %u ms: %s\n",
                   (unsigned)phase, side, (unsigned)now, avoidance_phase_name[phase]);
         if (phase == S5_TURN_OUT)
-            tm_printf((UB*)"[S5] bypass side=%s turn=%u deg departure=%u mm offset=%u mm pass=%u mm\n",
+            tm_printf((UB*)"[S5] bypass side=%s turn=%u deg offset=%u mm initial forward target=%u mm path=%s\n",
                       side == S5_LEFT ? "T (left)" : "R (right)",
-                      S5_LATERAL_TURN_DEG, offset, offset, pass);
+                      S5_LATERAL_TURN_DEG, offset, pass, rounded ? "rounded" : "pivot");
         if (phase == S5_FAILED)
             tm_printf((UB*)"[S5] stopped during %s, detour reason=%u vehicle reason=%u\n",
                       avoidance_phase_name[previous], failure, reason);

@@ -12,7 +12,7 @@
 #define S5_NO_TARGET_MAX_US 47300u
 #define S5_OPEN_RANGE 4094u
 #define S5_UNKNOWN_RANGE 4095u
-#define S5_SCAN_STOP_MM 220u
+#define S5_SCAN_STOP_MM 240u
 #define S5_CLEAR_MM 270u
 
 static inline bool s5_range_measured(unsigned range)

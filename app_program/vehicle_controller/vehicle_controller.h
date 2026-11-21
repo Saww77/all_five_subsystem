@@ -19,9 +19,10 @@ BOOL vehicle_submit_terrain(unsigned height_mm,unsigned phase);
 void vehicle_enable_obstacle_monitor(void);
 void vehicle_submit_obstacle_range(unsigned range_mm);
 void vehicle_submit_obstacle_ping(S5_PING ping);
-BOOL vehicle_obstacle_scan_request(uint32_t *request);
+BOOL vehicle_obstacle_scan_request(uint32_t *request, S5_SIDE *check_side);
 BOOL vehicle_obstacle_scan_current(uint32_t request);
 void vehicle_finish_obstacle_scan(const S5_PROFILE *profile, uint32_t request);
+void vehicle_finish_obstacle_return_check(unsigned clear_mm, uint32_t request);
 typedef struct {
     uint32_t timestamp_ms,line_timestamp_ms,terrain_timestamp_ms,obstacle_timestamp_ms;
     unsigned state:3, reason:3, start_block:4, last_start_reject:4;
@@ -30,8 +31,8 @@ typedef struct {
     unsigned height_mm:11, terrain_phase:3;
     unsigned near_mm:12, width_mm:11, clear_left_mm:12, clear_right_mm:12;
     unsigned obstacle_angle_offset:7, obstacle_no_echo:1;
-    unsigned avoidance_phase:4, avoidance_side:2, obstacle_profile:1;
-    unsigned avoidance_failure:4, avoidance_failed_phase:4, obstacle_forward_mm:12;
+    unsigned avoidance_phase:5, avoidance_side:2, obstacle_profile:1;
+    unsigned avoidance_failure:4, avoidance_failed_phase:5, obstacle_forward_mm:12;
     unsigned motor_ready:1, link_ready:1, start_pending:1, stop_pending:1, reset_pending:1;
     unsigned line_valid:1, line_stop:1, terrain_valid:1, obstacle_valid:1, obstacle_blocked:1;
     unsigned telemetry_drops,timing_fault_gap_us,control_gap_limit_us;

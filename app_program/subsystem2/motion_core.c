@@ -6,6 +6,9 @@
 
 #define WHEEL_CIRCUMFERENCE_UM ((uint32_t)((uint64_t)WHEEL_DIAMETER_MM*3141593u/1000u))
 #define S5_MANEUVER_RPM 24u
+#define ARC_OUTSIDE_RPM 32u
+
+_Static_assert(S2_ARC_RADIUS_MM * 2u > EFFECTIVE_TRACK_MM, "Both wheels must roll forward on a detour arc");
 
 enum { IDLE, VELOCITY, DISTANCE, TURN };
 enum { FAULT_COUNTS=1, FAULT_TIMING=2, FAULT_STALL=4, FAULT_TIMEOUT=8 };
@@ -21,6 +24,7 @@ static struct {
     unsigned right_rpm:8;
     unsigned left_reverse:1;
     unsigned right_reverse:1;
+    unsigned arc:1;
     unsigned faults:4;
 } state;
 /* Explicit initial bounds: RPM 0..300 (9); errors -300..240 (10 signed);
@@ -101,6 +105,7 @@ void s2_core_stop(void)
 {
     drive(0,0); drive(1,0);
     state.mode=IDLE;
+    state.arc=false;
     crawling=false;
     for(unsigned i=0;i<2;i++) {
         wheels[i].integral=0;
@@ -219,6 +224,39 @@ bool s2_core_maneuver(unsigned arg)
     return accepted;
 }
 
+static unsigned arc_counts(bool inside,unsigned wheel)
+{
+    /* For a quarter turn, the wheel path is pi/2 times its own radius.
+       Pi cancels when converting the path to wheel revolutions. */
+    unsigned diameter=2u*S2_ARC_RADIUS_MM;
+    unsigned path_diameter=inside?diameter-EFFECTIVE_TRACK_MM:diameter+EFFECTIVE_TRACK_MM;
+    unsigned denominator=4u*WHEEL_DIAMETER_MM*10u;
+    return (path_diameter*cpr(wheel)+denominator/2u)/denominator;
+}
+
+bool s2_core_arc(bool right)
+{
+    unsigned level=state.level;
+    if(!level)state.level=1;
+    bool accepted=start(TURN,false,false,arc_counts(!right,0),arc_counts(right,1));
+    state.level=level;
+    if(!accepted)return false;
+    unsigned inner=(ARC_OUTSIDE_RPM*(2u*S2_ARC_RADIUS_MM-EFFECTIVE_TRACK_MM)+
+                    S2_ARC_RADIUS_MM+EFFECTIVE_TRACK_MM/2u)/
+                   (2u*S2_ARC_RADIUS_MM+EFFECTIVE_TRACK_MM);
+    state.arc=true;
+    state.left_rpm=right?ARC_OUTSIDE_RPM:inner;
+    state.right_rpm=right?inner:ARC_OUTSIDE_RPM;
+    return true;
+}
+
+bool s2_core_arc_finished(bool right,const S2_STATUS *status)
+{
+    return s2_get_bits(status,0,2)==IDLE && !s2_get_bits(status,5,4) &&
+           s2_get_bits(status,41,13)>=arc_counts(!right,0) &&
+           s2_get_bits(status,54,13)>=arc_counts(right,1);
+}
+
 bool s2_core_distance_reached(unsigned mm,const S2_STATUS *status)
 {
     return s2_get_bits(status,41,13)>=distance_counts(mm,0) &&
@@ -278,11 +316,20 @@ void s2_core_service(void)
     if(moving && state.mode!=VELOCITY && now-command_start>MOVE_TIMEOUT_US) { fail(FAULT_TIMEOUT); return; }
     bool slow_forward=state.mode==VELOCITY && !state.left_reverse && !state.right_reverse &&
                       state.left_rpm<=S2_CRAWL_MAX_RPM && state.right_rpm<=S2_CRAWL_MAX_RPM;
-    if(slow_forward && !crawling) { crawl=(S2_CRAWL){0}; }
-    crawling=slow_forward;
+    bool low_speed=slow_forward || state.arc;
+    if(low_speed && !crawling) { crawl=(S2_CRAWL){0}; }
+    crawling=low_speed;
     uint32_t crawl_rpm[2]={0};
     if(crawling) { s2_crawl_sample(&crawl,(uint16_t)elapsed,sample,crawl_rpm); }
-    bool match_wheels=crawling && state.left_rpm==state.right_rpm && state.left_rpm!=0u;
+    bool match_wheels=slow_forward && state.left_rpm==state.right_rpm && state.left_rpm!=0u;
+    int arc_trim=0;
+    if(state.arc) {
+        /* Correct the fraction of each wheel's arc completed. This keeps the
+           turn on its radius when one wheel needs more torque to start. */
+        int left=(int)(wheels[0].progress*100u/wheels[0].target);
+        int right=(int)(wheels[1].progress*100u/wheels[1].target);
+        arc_trim=clamp((right-left)/2,-3,3);
+    }
 
     for(unsigned w=0;w<2;w++) {
         unsigned n=(sample>>(w?5:0))&31u;
@@ -301,6 +348,7 @@ void s2_core_service(void)
             if(p>=wheels[w].target) { drive(w,0); continue; }
         }
         unsigned target=w?state.right_rpm:state.left_rpm;
+        if(state.arc)target=(unsigned)((int)target+(w?-arc_trim:arc_trim));
         if(!target) {
             if(state.mode==VELOCITY && (state.left_rpm || state.right_rpm)) {
                 hold_pivot_wheel(w);

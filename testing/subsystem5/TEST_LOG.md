@@ -43,6 +43,10 @@ cc -std=gnu11 -Wall -Wextra -Werror -DPROHIBIT_DEF_SIZE_T -D_PICO_RP2040_ \
   testing/subsystem5/test_controller_events.c app_program/subsystem5/s5_avoid.c \
   app_program/vehicle_controller/vehicle_core.c -o /tmp/test_s5_controller
 /tmp/test_s5_controller
+
+cc -std=gnu11 -Wall -Wextra -Werror testing/subsystem5/test_arc_motion.c \
+  app_program/subsystem2/motion_crawl.c -o /tmp/test_s5_arc
+/tmp/test_s5_arc
 ```
 
 ### Stationary sonar bench
@@ -58,3 +62,5 @@ Place a flat box about 200 mm ahead. Confirm the forward echo, five coarse beari
 ### Track acceptance
 
 Use the MQTT build and keep STOP available. Start on a straight section, with the box ahead and room on one side. Verify that both wheels stop before the sweep, that the car drives only after a fresh clearance reading, and that the outer IR sensors find the original tape before the dashboard returns to Follow line. Repeat with room on the other side and with both sides blocked. The firmware assumes 60 mm from the outer IR sensors to the drive axle. Measure that distance on the assembled car and update `S5_IR_TO_AXLE_MM` if needed before tuning the return alignment.
+
+For the rounded path, check the 100 mm turn radius at the axle midpoint and verify both wheels roll forward during each arc. Use a deeper box or a second target beside the return corridor to check that the car passes farther before turning toward the tape. Remove the return echo during a stopped check and verify it holds. Record bypass time and width error against a measured box on the track. The two angled sonar readings sample the return corridor at those bearings.
