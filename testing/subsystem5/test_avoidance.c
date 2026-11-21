@@ -615,6 +615,50 @@ static void test_departure_room_after_retrace(void)
     assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_TURN_OUT);
 }
 
+static void test_clipped_retrace_keeps_box_in_range(void)
+{
+    S5_PROFILE scan = {.nearest_mm = 221, .front_mm = 206, .width_mm = 231,
+                       .left_clipped = true, .right_clipped = true,
+                       .left_path_mm = 241, .right_path_mm = 240,
+                       .left_mm = S5_UNKNOWN_RANGE, .right_mm = S5_UNKNOWN_RANGE};
+    S5_AVOID state = {.phase = S5_PROFILE_PATH, .phase_at = 100};
+    S5_AVOID_INPUT in = {.now = 500, .profile_at = 450, .range_at = 500, .range_mm = 221,
+                        .profile_valid = true, .stopped = true, .range_valid = true,
+                        .line_centered = true, .profile = scan};
+    S5_AVOID no_trail = state;
+    assert(s5_avoid_step(&no_trail, &in).action == S5_WAIT && no_trail.phase == S5_WAIT_PATH);
+    assert(no_trail.failure == S5_FAIL_BOTH_LIMITS);
+
+    state.reverse_available = state.reverse_long = true;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_BACK_UP);
+    in.now = in.range_at = 800;
+    S5_AVOID_OUTPUT move = s5_avoid_step(&state, &in);
+    assert(move.action == S5_REVERSE && move.distance_mm == 60);
+    in.motion = S5_MOTION_DONE;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_PROFILE_PATH);
+    assert(s5_scan_range_limit(&state) == 330);
+
+    in.motion = S5_MOTION_NONE;
+    in.now = in.profile_at = in.range_at = 1000;
+    in.profile.nearest_mm = in.range_mm = 281;
+    S5_AVOID second_clipped = state;
+    assert(s5_avoid_step(&second_clipped, &in).action == S5_WAIT && second_clipped.phase == S5_WAIT_PATH);
+    for (unsigned i = 0; i < 2; ++i) {
+        in.now = in.range_at = in.now + 1000;
+        assert(s5_avoid_step(&second_clipped, &in).action == S5_WAIT);
+        assert(second_clipped.phase == S5_WAIT_PATH && second_clipped.failure == S5_FAIL_BOTH_LIMITS);
+    }
+
+    /* The same obstacle now has a verified right route at the farther position. */
+    in.profile.right_clipped = false;
+    in.profile.right_edge_valid = true;
+    in.profile.right_edge_mm = 95;
+    in.profile.right_path_mm = 1000;
+    in.profile_at = in.now;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_TURN_OUT);
+    assert(state.side == S5_RIGHT && state.rounded_departure);
+}
+
 static void test_close_left_obstacle_with_right_clearance(bool has_retrace)
 {
     S5_AVOID state = {.phase = S5_PROFILE_PATH, .phase_at = 100,
@@ -1071,6 +1115,7 @@ int main(void)
     test_stationary_retry();
     test_clipped_scan(false);
     test_clipped_scan(true);
+    test_clipped_retrace_keeps_box_in_range();
     test_departure_room_after_retrace();
     test_close_left_obstacle_with_right_clearance(true);
     test_close_left_obstacle_with_right_clearance(false);

@@ -26,6 +26,8 @@
 _Static_assert(S2_ARC_ANGLE_DEG == 60u, "Return offset projections use a 60 degree arc");
 _Static_assert(S5_FOLLOW_CLEAR_MM + S5_PASS_UNCERTAIN_DEPTH_MM + S5_PASS_BODY_ALLOWANCE_MM <= S5_MAX_PASS_MM,
                "The conservative default depth must fit the bypass budget");
+_Static_assert(S5_FOLLOW_CLEAR_MM + S5_LONG_REVERSE_MM <= S5_MAX_PROJECTED_FRONT_MM,
+               "The retry window must fit the sonar projection");
 _Static_assert(S5_CLEAR_MM + NESTED_PASS_MARGIN_MM <= NESTED_PASS_LIMIT_MM,
                "The maximum nested pass must fit the nested bypass budget");
 _Static_assert(S5_MAX_PASS_MM < 1024u, "Total pass distance must fit the 10-bit fields");
@@ -152,10 +154,18 @@ static unsigned side_range(unsigned heading, unsigned background, unsigned offse
     return heading;
 }
 
-S5_BYPASS s5_plan_bypass(const S5_PROFILE *profile)
+unsigned s5_scan_range_limit(const S5_AVOID *state)
+{
+    if (state->depth) return S5_CLEAR_MM;
+    unsigned extra = state->scan_after_retrace ?
+                     (state->reverse_long ? S5_LONG_REVERSE_MM : S5_REVERSE_MM) : 0u;
+    return S5_FOLLOW_CLEAR_MM + extra;
+}
+
+static S5_BYPASS plan_bypass(const S5_PROFILE *profile, unsigned limit_mm)
 {
     S5_BYPASS plan = {.failure = S5_FAIL_TARGET};
-    if (!s5_range_measured(profile->nearest_mm) || profile->nearest_mm > S5_FOLLOW_CLEAR_MM)
+    if (!s5_range_measured(profile->nearest_mm) || profile->nearest_mm > limit_mm)
         return plan;
 
     unsigned left_offset = bypass_offset(-profile->left_edge_mm, profile->left_edge_valid);
@@ -201,6 +211,11 @@ S5_BYPASS s5_plan_bypass(const S5_PROFILE *profile)
     return plan;
 }
 
+S5_BYPASS s5_plan_bypass(const S5_PROFILE *profile)
+{
+    return plan_bypass(profile, S5_FOLLOW_CLEAR_MM);
+}
+
 static unsigned leg_distance(const S5_AVOID *state, const S5_AVOID_INPUT *in)
 {
     switch (state->phase) {
@@ -239,6 +254,7 @@ static S5_AVOID_OUTPUT avoid_on_leg(S5_AVOID *state, const S5_AVOID_INPUT *in)
     state->scan_retried = state->probe_left = false;
     state->reverse_available = travelled >= S5_REVERSE_MM;
     state->reverse_long = travelled >= S5_LONG_REVERSE_MM;
+    state->scan_after_retrace = false;
     state->offset_mm = state->next_pass_mm = state->passed_mm = 0;
     state->widening = false;
     state->rounded_departure = false;
@@ -337,7 +353,7 @@ static S5_AVOID_OUTPUT wait_for_path(S5_AVOID *state, S5_FAILURE reason, const S
     state->failed_phase = state->phase;
     state->blocked_range_mm = S5_UNKNOWN_RANGE;
     if (in->range_valid && in->now - in->range_at <= S5_RANGE_MAX_AGE_MS &&
-        in->range_mm <= (state->depth ? S5_CLEAR_MM : S5_FOLLOW_CLEAR_MM))
+        in->range_mm <= s5_scan_range_limit(state))
         state->blocked_range_mm = in->range_mm;
     return go(state, S5_WAIT_PATH, in->now);
 }
@@ -355,7 +371,7 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
     if (phase == S5_OFF || phase == S5_COMPLETE || phase == S5_FAILED) return wait;
 
     uint32_t elapsed = in->now - state->phase_at;
-    unsigned clear_mm = state->depth ? S5_CLEAR_MM : S5_FOLLOW_CLEAR_MM;
+    unsigned clear_mm = s5_scan_range_limit(state);
     bool range_fresh = in->range_valid && in->now - in->range_at <= S5_RANGE_MAX_AGE_MS;
     bool proof_fresh = in->profile_valid && in->profile.pivot_confirmed &&
                        in->now - in->profile_at <= PIVOT_PROOF_MAX_AGE_MS;
@@ -452,7 +468,7 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         state->range_seen = false;
         S5_PROFILE profile = in->profile;
         if (range_fresh && in->range_mm < profile.front_mm) profile.front_mm = in->range_mm;
-        S5_BYPASS plan = s5_plan_bypass(&profile);
+        S5_BYPASS plan = plan_bypass(&profile, clear_mm);
         if (s5_range_available(profile.nearest_mm) && !range_fresh &&
             !(state->depth && plan.probe_left && proof_fresh)) {
             if (in->now - in->profile_at >= POST_SCAN_RANGE_TIMEOUT_MS)
@@ -484,15 +500,22 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
             return (S5_AVOID_OUTPUT){.action = S5_RESCAN};
         }
         bool clipped = reason >= S5_FAIL_LEFT_LIMIT;
-        /* Change vantage point only if the tracked segment permits retracing and
-           a clipped target should still be in profiling range after the move. */
+        bool both_clipped = reason == S5_FAIL_BOTH_LIMITS && !state->depth;
+        /* Retrace only a verified straight segment. A single clipped edge gets
+           a retry only if the target should stay within the normal window. */
         bool retrace_in_range = range_fresh && in->range_mm <= clear_mm - S5_REVERSE_MM;
         bool on_retrace = state->depth || (in->line_centered && !in->line_junction);
-        if (state->reverse_available && range_fresh && on_retrace && (!clipped || retrace_in_range)) {
+        if (state->reverse_available && range_fresh && on_retrace &&
+            (both_clipped || !clipped || retrace_in_range)) {
             state->reverse_available = false;
-            state->reverse_long = state->reverse_long && reason == S5_FAIL_ROOM &&
-                                  profile.front_mm <= clear_mm - S5_LONG_REVERSE_MM &&
-                                  range_fresh && in->range_mm <= clear_mm - S5_LONG_REVERSE_MM;
+            if (both_clipped) {
+                /* A box can remain in the path beyond the original scan limit after retreating. */
+                state->scan_after_retrace = state->scan_retried = true;
+            } else {
+                state->reverse_long = state->reverse_long && reason == S5_FAIL_ROOM &&
+                                      profile.front_mm <= clear_mm - S5_LONG_REVERSE_MM &&
+                                      in->range_mm <= clear_mm - S5_LONG_REVERSE_MM;
+            }
             return go(state, S5_BACK_UP, in->now);
         }
         return wait_for_path(state, range_fresh ? reason : S5_FAIL_ECHO, in);

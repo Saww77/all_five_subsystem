@@ -75,7 +75,7 @@ typedef struct {
     uint32_t phase_at, last_line_at, last_range_at;
     S5_INTERRUPTED_LEG interrupted[S5_NESTED_LIMIT];
     unsigned phase:5, side:2, line_samples:2, reverse_available:1;
-    unsigned reverse_long:1, scan_retried:1, probe_left:1, failure:4, failed_phase:5;
+    unsigned reverse_long:1, scan_retried:1, probe_left:1, scan_after_retrace:1, failure:4, failed_phase:5;
     unsigned offset_mm:10, next_pass_mm:10, passed_mm:10, depth:2;
     unsigned leg_progress_mm:10, issued_mm:10, waiting_echo:1, short_approach:1;
     unsigned blocked_range_mm:12;
@@ -93,6 +93,7 @@ typedef struct {
 } S5_BYPASS;
 
 S5_BYPASS s5_plan_bypass(const S5_PROFILE *profile);
+unsigned s5_scan_range_limit(const S5_AVOID *state);
 unsigned s5_planned_pass_mm(const S5_PROFILE *profile, unsigned forward_mm);
 unsigned s5_reentry_detection_mm(unsigned offset_mm, unsigned sensor_to_axle_mm);
 unsigned s5_return_tape_distance_mm(const S5_AVOID *state);

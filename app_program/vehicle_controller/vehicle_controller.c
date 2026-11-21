@@ -262,7 +262,7 @@ BOOL vehicle_obstacle_scan_request(uint32_t *request, unsigned *limit_mm)
     BOOL allowed = scan_wanted() && pending.scan == SCAN_READY;
     if (allowed) {
         *request = scan_request_id;
-        if (limit_mm) *limit_mm = model.avoidance.depth ? S5_CLEAR_MM : S5_FOLLOW_CLEAR_MM;
+        if (limit_mm) *limit_mm = s5_scan_range_limit(&model.avoidance);
         pending.scan = SCAN_ACTIVE;
     }
     unlock();
