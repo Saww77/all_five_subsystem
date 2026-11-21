@@ -42,7 +42,8 @@ static unsigned return_clear_mm;
 
 static bool line_hit(void)
 {
-    unsigned darkness = model.avoidance.phase == S5_FIND_LINE ? S5_RECOVERY_LINE_DARK : S5_LINE_DARK;
+    S5_PHASE phase = model.avoidance.phase;
+    unsigned darkness = phase == S5_FIND_LINE || phase == S5_CHECK_LINE ? S5_RECOVERY_LINE_DARK : S5_LINE_DARK;
     return data.l >= darkness || data.r >= darkness;
 }
 static bool range_valid(uint32_t now)
@@ -154,6 +155,7 @@ static VC_INPUT controller_input(BOOL ready, BOOL linked, unsigned faults, bool 
             .return_at = return_at, .return_clear_mm = return_clear_mm,
             .return_received = pending.return_received,
             .line_at = data.line_timestamp_ms, .line_hit = line_hit(),
+            .line_center_seen = data.c >= S5_RECOVERY_LINE_DARK,
             .line_junction = data.l >= S5_WIDE_MARKING && data.r >= S5_WIDE_MARKING,
             .sensor_to_axle_mm = S5_IR_TO_AXLE_MM,
         },
@@ -457,10 +459,8 @@ static TMO vehicle_service_once(void)
     unsigned left_measured = s2_get_bits(&status, 9, 9);
     unsigned right_measured = s2_get_bits(&status, 18, 9);
     in.avoidance.stopped = ready && !busy && left_measured <= 2 && right_measured <= 2;
-    /* Both outside sensors can see the original line together during the inward
-       crossing. On the track heading both dark still indicates a junction. */
-    /* GP27 is the barcode reader. Only the two line sensors can confirm
-       a crossing. On the original heading they straddle the tape. */
+    /* The outer sensors straddle the tape on a straight. This reading alone
+       cannot confirm tape after a detour. */
     in.avoidance.line_centered = !in.avoidance.line_hit &&
                                 data.l < S5_LINE_DARK && data.r < S5_LINE_DARK;
     if (model.avoidance.phase == S5_FIND_LINE && !model.avoidance.depth) {

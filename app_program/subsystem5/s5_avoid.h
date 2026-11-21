@@ -72,7 +72,7 @@ typedef struct {
     bool stopped : 1, range_valid : 1, profile_valid : 1;
     bool line_hit : 1, line_junction : 1, line_centered : 1, can_retrace : 1;
     bool near_original_line : 1, can_retrace_far : 1, echo_quiet : 1;
-    bool return_received : 1;
+    bool return_received : 1, line_center_seen : 1;
 } S5_AVOID_INPUT;
 typedef struct {
     unsigned phase:5, side:2, offset_mm:10, next_pass_mm:10;
@@ -89,6 +89,7 @@ typedef struct {
     unsigned leg_progress_mm:10, issued_mm:10, waiting_echo:1, short_approach:1;
     unsigned blocked_range_mm:12;
     unsigned widening:1, additional_outward_mm:6, rear_clearance_pending:1, rounded_return:1;
+    unsigned rounded_departure:1;
 } S5_AVOID;
 typedef struct {
     uint16_t action : 4;
@@ -96,7 +97,7 @@ typedef struct {
 } S5_AVOID_OUTPUT;
 
 typedef struct {
-    unsigned side:2, failure:4, probe_left:1;
+    unsigned side:2, failure:4, probe_left:1, rounded_departure:1;
     unsigned offset_mm:9, pass_mm:9;
 } S5_BYPASS;
 
