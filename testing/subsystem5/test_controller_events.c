@@ -5,7 +5,8 @@
 
 static uint32_t clock_ms;
 static unsigned event_flags, stop_count, command_count, scan_count, clear_count;
-static unsigned right_turn_count, left_turn_count;
+static unsigned ranging_wakes;
+static bool near_tape;
 static unsigned connection = 7;
 static bool motor_busy;
 static S2_STATUS motor;
@@ -36,9 +37,7 @@ ER tk_wai_flg(ID id, UINT wanted, UINT mode, UINT *seen, TMO timeout)
 unsigned s1_connection_status(void) { return connection; }
 uint32_t s2_core_timing_fault_gap_us(void) { return 0; }
 bool s2_core_distance_reached(unsigned mm, const S2_STATUS *status)
-{ (void)mm; (void)status; return false; }
-unsigned s2_core_distance_travelled_mm(const S2_STATUS *status)
-{ (void)status; return 55; }
+{ (void)mm; (void)status; return near_tape; }
 bool s2_core_maneuver_finished(unsigned arg, const S2_STATUS *status)
 { (void)arg; return s2_get_bits(status, 0, 2) == 0; }
 bool s2_core_arc_finished(bool right, const S2_STATUS *status)
@@ -71,11 +70,7 @@ bool motion_set_wheel_rpm_tracked(unsigned left, unsigned right, uint16_t *comma
 bool motion_clear_faults(void) { ++clear_count; return true; }
 bool motion_maneuver(unsigned mm, bool right, uint16_t *command)
 {
-    assert(!queued_command);
-    if (!mm) {
-        if (right) ++right_turn_count;
-        else ++left_turn_count;
-    }
+    assert(!queued_command && mm && !right);
     *command = queued_command = (uint16_t)(1u + (mm << 4));
     motor_busy = true;
     return true;
@@ -89,7 +84,11 @@ bool motion_arc(bool right, uint16_t *command)
     motor_busy = true;
     return true;
 }
-void subsystem5_request_scan(void) { ++scan_count; }
+void subsystem5_wake(void)
+{
+    if (pending.scan == SCAN_READY) ++scan_count;
+    else ++ranging_wakes;
+}
 
 static void motor_acknowledge(unsigned reason)
 {
@@ -125,22 +124,19 @@ static unsigned vehicle_state(void)
     return snapshot.state;
 }
 
-static void test_arc_echo_requires_recent_clearance(void)
+static void complete_move(void)
 {
-    const struct { unsigned range, age; S5_ECHO_STATE echo; } cases[] = {
-        {S5_MANEUVER_STOP_MM, 60, S5_ECHO_FALL_TIMEOUT},
-        {215, VC_ECHO_GRACE_MS + 1u, S5_ECHO_FALL_TIMEOUT},
-        {215, 60, S5_ECHO_HIGH},
-    };
-    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
-        vehicle_enable_obstacle_monitor();
-        drive = (__typeof__(drive)){.command = S2_ARC, .moving = true};
-        vehicle_submit_obstacle_range(cases[i].range);
-        event_flags = 0;
-        clock_ms += cases[i].age;
-        vehicle_submit_obstacle_ping(s5_classify_echo(cases[i].echo, 0));
-        assert(event_flags == VC_WAKE && !range_valid(clock_ms) && !pending.echo_grace_used);
-    }
+    motor_acknowledge(S2_REPLY_OK);
+    work();
+    motor_stopped();
+    work();
+}
+
+static void settle_step(void)
+{
+    clock_ms += 260;
+    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
+    work();
 }
 
 int main(void)
@@ -298,111 +294,83 @@ int main(void)
     clock_ms += 20;
     vehicle_submit_obstacle_range(S5_UNKNOWN_RANGE);
     vehicle_finish_obstacle_scan(&saved, request);
-    assert(work() > 0 && vehicle_state() == VC_AVOIDING && !right_turn_count);
-    assert(vehicle_get_snapshot(&snapshot) && snapshot.obstacle_profile && snapshot.obstacle_no_echo);
-    clock_ms += 500;
-    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
-    assert(work() > 0 && scan_count == scans_before && !right_turn_count);
-    vehicle_submit_obstacle_range(196);
-    assert(work() > 0 && scan_count == scans_before && !right_turn_count);
+    assert(work() > 0 && model.avoidance.phase == S5_TURN_OUT);
+    assert(vehicle_obstacle_ranging_paused() && !queued_command);
+    assert(vehicle_get_snapshot(&snapshot) && snapshot.obstacle_profile && !snapshot.obstacle_no_echo);
 
-    clock_ms += 260;
-    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
-    vehicle_submit_obstacle_range(196);
-    assert(work() > 0 && right_turn_count == 0 && queued_command == (S2_ARC | (1u << 4)));
-    assert(vehicle_get_snapshot(&snapshot) && snapshot.avoidance_phase == S5_TURN_OUT &&
-           snapshot.width_mm == 294 && snapshot.avoidance_failure == S5_FAIL_NONE);
+    settle_step();
+    assert(queued_command == (S2_ARC | (1u << 4)));
     motor_acknowledge(S2_REPLY_OK);
     work();
-    uint32_t last_range_at = obstacle_range_at;
-    clock_ms += 120;
-    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
-    unsigned arc_stops_before = stop_count;
+    /* A late in-flight ping is dropped even if it would indicate an obstacle. */
+    vehicle_submit_obstacle_range(60);
     vehicle_submit_obstacle_ping(s5_classify_echo(S5_ECHO_FALL_TIMEOUT, 0));
-    assert(work() > 0 && motor_busy && stop_count == arc_stops_before);
-    assert(obstacle_range_at == last_range_at);
-    assert(vehicle_get_snapshot(&snapshot) && snapshot.obstacle_forward_mm == 196 &&
-           !snapshot.obstacle_no_echo && vehicle_state() == VC_AVOIDING);
-    vehicle_submit_obstacle_range(1000);
-    work();
-    motor_stopped();
-    work();
-    clock_ms += 260;
-    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
-    vehicle_submit_obstacle_range(1000);
-    assert(work() > 0 && queued_command && model.avoidance.phase == S5_SHIFT_OUT);
-    motor_acknowledge(S2_REPLY_OK);
-    work();
-    motor_stopped();
-    work();
-    clock_ms += 260;
-    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
-    vehicle_submit_obstacle_range(1000);
-    assert(work() > 0 && queued_command == S2_ARC);
-    motor_acknowledge(S2_REPLY_OK);
-    work();
+    assert(!event_flags && !range_valid(clock_ms));
     motor_stopped();
     work();
 
-    clock_ms += 260;
-    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
-    vehicle_submit_obstacle_range(1000);
-    assert(work() > 0 && queued_command && model.avoidance.phase == S5_PASS);
-    unsigned covered = model.avoidance.leg_progress_mm;
-    unsigned requested = model.avoidance.issued_mm;
-    assert(requested > 55);
+    settle_step();
+    assert(model.avoidance.phase == S5_SHIFT_OUT && (queued_command >> 4) == 70);
+    complete_move();
+    settle_step();
+    assert(queued_command == S2_ARC);
+    complete_move();
+
+    settle_step();
+    assert(model.avoidance.phase == S5_PASS && (queued_command >> 4) == 196 + 294 + 160 - 209);
+    complete_move();
+    settle_step();
+    assert(model.avoidance.phase == S5_TURN_IN && queued_command == S2_ARC);
+    complete_move();
+
+    settle_step();
+    assert(model.avoidance.phase == S5_FIND_LINE && (queued_command >> 4) == 168);
     motor_acknowledge(S2_REPLY_OK);
     work();
-
-    /* A quiet echo during the straight pass stops the wheels locally.
-       Two fresh forward readings permit the remaining encoder distance. */
-    scans_before = scan_count;
-    unsigned stops_before = stop_count;
-    S5_PING missed = s5_classify_echo(S5_ECHO_QUIET, 0);
-    clock_ms += 90;
-    vehicle_submit_obstacle_ping(missed);
-    assert(!event_flags);
-    assert(vehicle_get_snapshot(&snapshot) && snapshot.obstacle_forward_mm == 1000 && !snapshot.obstacle_no_echo);
-    clock_ms += 90;
-    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
-    vehicle_submit_obstacle_ping(missed);
-    assert(work() > 0 && stop_count == stops_before + 1 && model.avoidance.waiting_echo);
-    assert(model.avoidance.phase == S5_PASS && model.avoidance.leg_progress_mm == covered + 55);
+    near_tape = true;
+    for (unsigned i = 0; i < 2; ++i) {
+        clock_ms += 10;
+        vehicle_submit_line(108, 0, 850, 30, 30, FALSE, 0);
+        work();
+    }
+    assert(model.avoidance.phase == S5_ALIGN_LINE && !queued_command);
     motor_stopped();
     work();
-    clock_ms += 260;
-    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
-    vehicle_submit_obstacle_range(1000);
-    assert(work() > 0 && model.avoidance.waiting_echo && !queued_command);
-    clock_ms += 60;
-    vehicle_submit_obstacle_range(1000);
-    assert(work() > 0 && !model.avoidance.waiting_echo);
-    vehicle_notify_feedback();
-    assert(work() > 0 && (queued_command >> 4) == requested - 55);
-    motor_acknowledge(S2_REPLY_OK);
-    work();
-    motor_stopped();
-    work();
-    assert(model.avoidance.phase == S5_TURN_IN && model.avoidance.rounded_return);
-    assert(scan_count == scans_before && !vehicle_obstacle_scan_request(&request, NULL));
+    settle_step();
+    assert(queued_command == (S2_ARC | (1u << 4)));
+    complete_move();
+    assert(model.avoidance.phase == S5_CHECK_LINE && vehicle_obstacle_ranging_paused());
 
+    unsigned wakes_before = ranging_wakes;
     clock_ms += 260;
-    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
-    vehicle_submit_obstacle_range(1000);
-    assert(work() > 0 && queued_command == S2_ARC);
-    motor_acknowledge(S2_REPLY_OK);
+    vehicle_submit_line(23, 850, 33, 30, 30, FALSE, 0);
     work();
-    vehicle_submit_obstacle_ping(s5_classify_echo(S5_ECHO_FALL_TIMEOUT, 0));
-    assert(!event_flags && pending.echo_grace_used);
-    /* An unconfirmed no-target response does not restore the allowance. */
-    vehicle_submit_obstacle_range(S5_OPEN_RANGE);
-    assert(!event_flags && pending.echo_grace_used);
-    vehicle_submit_obstacle_ping(s5_classify_echo(S5_ECHO_QUIET, 0));
+    clock_ms += 10;
+    vehicle_submit_line(23, 850, 33, 30, 30, FALSE, 0);
     work();
+    assert(model.avoidance.phase == S5_COMPLETE && !vehicle_obstacle_ranging_paused());
+    assert(ranging_wakes == wakes_before + 1 && scan_count == scans_before);
+    assert(!vehicle_obstacle_scan_request(&request, NULL) && !queued_command);
+    settle_step();
+    assert(model.avoidance.phase == S5_COMPLETE && !queued_command);
     vehicle_submit_obstacle_range(600);
-    assert(vehicle_get_snapshot(&snapshot) && snapshot.state == VC_FAULT &&
-           snapshot.avoidance_failure == S5_FAIL_ECHO && snapshot.obstacle_no_echo &&
-           snapshot.obstacle_forward_mm == 600 && !queued_command);
+    assert(work() > 0 && vehicle_state() == VC_FOLLOW_LINE && queued_command);
+
+    /* STOP while off the tape must also wake forward ranging. */
+    vehicle_request_stop();
+    work();
+    motor_stopped();
+    work();
+    model = (VC_MODEL){.state = VC_RECOVER_LINE, .avoidance = {
+        .phase = S5_FIND_LINE, .phase_at = clock_ms, .side = S5_RIGHT, .search_mm = 168,
+    }};
+    wakes_before = ranging_wakes;
+    settle_step();
+    assert(vehicle_obstacle_ranging_paused() && queued_command);
+    vehicle_request_stop();
+    work();
+    assert(!vehicle_obstacle_ranging_paused() && ranging_wakes == wakes_before + 1);
+    assert(vehicle_state() == VC_IDLE && model.avoidance.failure == S5_FAIL_STOP);
 
     vehicle_submit_obstacle_range(500);
     assert(!obstacle_blocked(clock_ms));
@@ -422,12 +390,7 @@ int main(void)
     assert(vehicle_get_snapshot(&snapshot) && snapshot.obstacle_forward_mm == S5_OPEN_RANGE &&
            !snapshot.obstacle_blocked && snapshot.start_block == VC_START_OBSTACLE);
 
-    /* RESET acknowledges an off-track sonar fault without authorizing movement. */
-    assert(vehicle_state() == VC_FAULT && !vehicle_request_start());
-    vehicle_request_stop();
-    work();
-    motor_stopped();
-    work();
+    /* RESET acknowledges an interrupted off-track bypass without authorizing movement. */
     assert(vehicle_state() == VC_IDLE && !vehicle_request_start());
     assert(vehicle_request_reset());
     work();
@@ -459,6 +422,5 @@ int main(void)
     assert(model.avoidance.phase == S5_PROFILE_PATH && scan_count == scans_before + 1 &&
            !queued_command);
 
-    test_arc_echo_requires_recent_clearance();
-    puts("PASS one missed arc echo, persistent echo loss, straight-pass recovery and local STOP");
+    puts("PASS sonar pauses for the planned bypass, resumes on tape and wakes on local STOP");
 }

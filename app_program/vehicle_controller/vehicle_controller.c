@@ -154,9 +154,6 @@ static VC_INPUT controller_input(BOOL ready, BOOL linked, unsigned faults, bool 
         .avoidance = {
             .now = now, .range_at = obstacle_range_at, .range_mm = obstacle_range.range_mm,
             .range_valid = range_valid(now), .profile_at = full_profile_at,
-            .echo_quiet = pending.last_echo == S5_ECHO_QUIET && now - obstacle_range_at <= S5_RANGE_MAX_AGE_MS,
-            .echo_fall_timeout = pending.last_echo == S5_ECHO_FALL_TIMEOUT &&
-                                now - obstacle_range_at <= S5_RANGE_MAX_AGE_MS,
             .profile = full_profile, .profile_valid = pending.profile_valid,
             .retry_scan = pending.start,
             .line_at = data.line_timestamp_ms, .line_hit = line_hit(),
@@ -207,13 +204,13 @@ static void submit_obstacle_reading(unsigned range, S5_ECHO_STATE echo)
 {
     if (!lock()) return;
     uint32_t now = now_ms();
-    /* A bounded arc may be inside the line-follow stop range. Require the
-       arc's own reserve before retaining a reading across one missed echo. */
-    bool arc_clear = !drive.velocity && (drive.command & 15u) == S2_ARC &&
-                     obstacle_range.range_mm > S5_MANEUVER_STOP_MM;
-    bool missed = echo == S5_ECHO_QUIET || (arc_clear && echo == S5_ECHO_FALL_TIMEOUT);
-    bool hold = missed && !pending.echo_grace_used && s5_range_available(obstacle_range.range_mm) &&
-                (!obstacle_range.blocked || arc_clear) && now - obstacle_range_at <= VC_ECHO_GRACE_MS;
+    if (s5_avoid_executing(model.avoidance.phase)) {
+        unlock();
+        return;
+    }
+    bool hold = echo == S5_ECHO_QUIET && !pending.echo_grace_used &&
+                s5_range_available(obstacle_range.range_mm) && !obstacle_range.blocked &&
+                now - obstacle_range_at <= VC_ECHO_GRACE_MS;
     pending.last_echo = echo;
     bool accepted = false;
     if (hold) {
@@ -254,6 +251,14 @@ void vehicle_submit_obstacle_range(unsigned range)
 void vehicle_submit_obstacle_ping(S5_PING ping)
 {
     submit_obstacle_reading(ping.range_mm, ping.state);
+}
+
+BOOL vehicle_obstacle_ranging_paused(void)
+{
+    if (!lock()) return FALSE;
+    BOOL paused = s5_avoid_executing(model.avoidance.phase);
+    unlock();
+    return paused;
 }
 
 static BOOL scan_wanted(void)
@@ -316,13 +321,14 @@ BOOL vehicle_get_snapshot(VEHICLE_SNAPSHOT *out)
     BOOL ready=motion_get_feedback(&motor,NULL,&busy),linked=link_ready();
     *out=data;out->timestamp_ms=now_ms();out->motor_ready=ready;out->link_ready=linked;
     out->start_pending=pending.start;out->stop_pending=pending.stop;out->reset_pending=pending.reset;
-    out->obstacle_blocked = obstacle_blocked(out->timestamp_ms);
     S5_PHASE phase = model.avoidance.phase;
+    bool executing = s5_avoid_executing(phase);
+    out->obstacle_blocked = !executing && obstacle_blocked(out->timestamp_ms);
     /* Forward samples naturally age out during the initial sweep. */
     bool scanning = phase == S5_PROFILE_PATH && !pending.profile_valid;
     bool echo_fault = phase == S5_FAILED && model.avoidance.failure == S5_FAIL_ECHO;
     out->obstacle_no_echo = pending.obstacle_monitor &&
-                            (echo_fault || (!scanning && !range_valid(out->timestamp_ms)));
+                            (echo_fault || (!executing && !scanning && !range_valid(out->timestamp_ms)));
     out->avoidance_phase = model.avoidance.phase;
     out->avoidance_side = model.avoidance.side;
     out->avoidance_failure = model.avoidance.failure;
@@ -387,10 +393,8 @@ static void submit_output(const VC_INPUT *in, const VC_OUTPUT *out, const S2_REP
             submitted = motion_maneuver_reverse(out->maneuver.distance_mm, &drive.command);
         else if (action == S5_ADVANCE)
             submitted = motion_maneuver(out->maneuver.distance_mm, false, &drive.command);
-        else if (action == S5_ARC_LEFT || action == S5_ARC_RIGHT)
-            submitted = motion_arc(action == S5_ARC_RIGHT, &drive.command);
         else
-            submitted = motion_maneuver(0, action == S5_PIVOT_RIGHT, &drive.command);
+            submitted = motion_arc(action == S5_ARC_RIGHT, &drive.command);
         drive.velocity = false;
     } else {
         bool refresh = !drive.moving || in->avoidance.now - drive.refreshed >= VC_REFRESH_MS;
@@ -419,11 +423,10 @@ static const char *const avoidance_phase_name[] = {
     [S5_PASS] = "passing obstacle",
     [S5_TURN_IN] = "turning toward original line",
     [S5_FIND_LINE] = "searching for the line",
-    [S5_CENTER_LINE] = "line found, centring axle",
     [S5_ALIGN_LINE] = "realigning with the line",
     [S5_COMPLETE] = "line reacquired, resuming line following",
     [S5_FAILED] = "detour stopped",
-    [S5_CHECK_LINE] = "checking line and forward range",
+    [S5_CHECK_LINE] = "confirming the line",
     [S5_BACK_UP] = "reversing for another scan",
     [S5_WAIT_PATH] = "waiting to verify a route",
 };
@@ -439,13 +442,6 @@ static TMO vehicle_service_once(void)
     VC_INPUT in = controller_input(ready, link_ready(), s2_get_bits(&status, 5, 4), busy, now);
     VC_OUTPUT out;
     in.avoidance.motion = drive_feedback(&status, &reply, busy, now);
-    bool pivot_completed = in.avoidance.motion == S5_MOTION_DONE &&
-                           (drive.command & 15u) == S2_MANEUVER &&
-                           ((drive.command >> 4) & ~1u) == S2_MANEUVER_TURN;
-    if (model.avoidance.issued_mm && in.avoidance.motion == S5_MOTION_PENDING) {
-        unsigned travel = s2_core_distance_travelled_mm(&status);
-        in.avoidance.travel_mm = travel <= model.avoidance.issued_mm ? travel : model.avoidance.issued_mm;
-    }
     in.drive_failed = drive.failed;
     unsigned left_measured = s2_get_bits(&status, 9, 9);
     unsigned right_measured = s2_get_bits(&status, 18, 9);
@@ -454,13 +450,11 @@ static TMO vehicle_service_once(void)
        cannot confirm tape after a detour. */
     in.avoidance.line_centered = !in.avoidance.line_hit &&
                                 data.l < S5_LINE_DARK && data.r < S5_LINE_DARK;
-    if (model.avoidance.phase == S5_FIND_LINE && !model.avoidance.depth) {
-        unsigned min_cross_mm = s5_reentry_detection_mm(s5_return_tape_distance_mm(&model.avoidance),
-                                                        S5_IR_TO_AXLE_MM);
-        unsigned progress_mm = model.avoidance.leg_progress_mm;
+    if (model.avoidance.phase == S5_FIND_LINE) {
+        unsigned min_cross_mm = model.avoidance.search_after_mm;
         bool distance_command = in.avoidance.motion == S5_MOTION_PENDING || in.avoidance.motion == S5_MOTION_DONE;
-        in.avoidance.near_original_line = progress_mm >= min_cross_mm ||
-              (distance_command && s2_core_distance_reached(min_cross_mm - progress_mm, &status));
+        in.avoidance.near_original_line = !min_cross_mm ||
+              (distance_command && s2_core_distance_reached(min_cross_mm, &status));
     }
     bool straight = model.state == VC_FOLLOW_LINE && in.avoidance.line_centered &&
                     in.left_rpm == in.right_rpm &&
@@ -479,9 +473,8 @@ static TMO vehicle_service_once(void)
     if (pending.start && blocker != VC_START_READY) data.last_start_reject = blocker;
     pending.start = pending.stop = pending.line_stop = false;
     unsigned previous_reason = model.reason;
-    bool was_waiting_echo = model.avoidance.waiting_echo;
     S5_PHASE previous = model.avoidance.phase;
-    unsigned previous_depth = model.avoidance.depth;
+    bool was_executing = s5_avoid_executing(previous);
     vc_core_step(&model, &in, &out);
     bool reset_done = false;
     if (in.reset) {
@@ -507,10 +500,13 @@ static TMO vehicle_service_once(void)
     S5_PHASE phase = model.avoidance.phase;
     unsigned side = model.avoidance.side;
     unsigned offset = model.avoidance.offset_mm;
-    unsigned pass = model.avoidance.next_pass_mm;
-    unsigned depth = model.avoidance.depth;
-    bool widening = model.avoidance.widening;
-    bool waiting_echo = model.avoidance.waiting_echo;
+    unsigned pass = model.avoidance.pass_mm;
+    bool executing = s5_avoid_executing(phase);
+    if (executing && !was_executing) {
+        /* The next forward range must be from the new heading after rejoining. */
+        obstacle_range = (S5_RANGE_GATE){.range_mm = S5_UNKNOWN_RANGE, .blocked = true};
+        pending.follow_blocked = pending.echo_grace_used = false;
+    }
     /* Serialize dispatch with the request latch, so STOP can cancel an entire
        batch before any later movement is submitted. */
     submit_output(&in, &out, &reply, vc_core_detouring(&model));
@@ -545,35 +541,21 @@ static TMO vehicle_service_once(void)
     bool dispatch_failed = drive.failed;
     unlock();
 
-    if (scan) subsystem5_request_scan();
+    if (scan || (was_executing && !executing)) subsystem5_wake();
     if (dispatch_failed) vehicle_notify_feedback();
     if (reason == VC_REASON_STALE_LINE && previous_reason != VC_REASON_STALE_LINE)
         tm_printf((UB*)"[VC] stopped: local IR sample %s, last update %u ms ago\n",
                   in.line_valid ? "expired" : "invalid", (unsigned)in.line_age_ms);
-    if (!was_waiting_echo && waiting_echo)
-        tm_printf((UB*)"[S5] holding during %s until forward echoes recover\n", avoidance_phase_name[phase]);
-    else if (was_waiting_echo && !waiting_echo && phase == previous)
-        tm_printf((UB*)"[S5] forward echo recovered during %s, checking remaining travel\n", avoidance_phase_name[phase]);
     if (out.maneuver.action == S5_RESCAN)
         tm_printf((UB*)"[S5] scan inconclusive, retrying while stopped\n");
-    if (previous_depth < depth)
-        tm_printf((UB*)"[S5] new obstacle on detour, scanning from the interrupted leg\n");
-    if (pivot_completed)
-        tm_printf((UB*)"[S5] pivot complete in %s, encoder counts L=%u R=%u\n",
-                  avoidance_phase_name[previous], s2_get_bits(&status,41,13), s2_get_bits(&status,54,13));
-    if (!dispatch_failed && (out.maneuver.action == S5_PIVOT_LEFT || out.maneuver.action == S5_PIVOT_RIGHT))
-        tm_printf((UB*)"[S5] commanding %u deg pivot %s\n", S5_LATERAL_TURN_DEG,
-                  out.maneuver.action == S5_PIVOT_LEFT ? "left" : "right");
     if (!dispatch_failed && (out.maneuver.action == S5_ARC_LEFT || out.maneuver.action == S5_ARC_RIGHT))
         tm_printf((UB*)"[S5] commanding %u deg rolling turn %s\n", S2_ARC_ANGLE_DEG,
                   out.maneuver.action == S5_ARC_LEFT ? "left" : "right");
     if (previous != phase) {
         tm_printf((UB*)"[S5] avoidance phase=%u side=%u at %u ms: %s\n",
                   (unsigned)phase, side, (unsigned)now, avoidance_phase_name[phase]);
-        if (phase == S5_TURN_OUT && widening)
-            tm_printf((UB*)"[S5] lane still blocked, adding %u mm sideways\n", S5_OUTWARD_STEP_MM);
-        else if (phase == S5_TURN_OUT)
-            tm_printf((UB*)"[S5] bypass %s, sideways target=%u mm, initial forward target=%u mm\n",
+        if (phase == S5_TURN_OUT)
+            tm_printf((UB*)"[S5] planned bypass %s, sideways target=%u mm, straight pass=%u mm\n",
                       side == S5_LEFT ? "T (left)" : "R (right)", offset, pass);
         if (phase == S5_FAILED || phase == S5_WAIT_PATH)
             tm_printf((UB*)"[S5] stopped during %s, detour reason=%u vehicle reason=%u, "

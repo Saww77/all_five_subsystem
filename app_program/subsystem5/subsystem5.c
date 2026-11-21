@@ -117,34 +117,18 @@ static unsigned scan_edge(S5_SCAN *samples, unsigned anchor, unsigned reference,
 
 /* The last sweep bearing can be far from centre. Give the forward reading
    several chances after settling, and feed each ping through the range gate. */
-static bool refresh_forward(uint32_t request)
+static void refresh_forward(uint32_t request)
 {
     bool open_last = false;
     for (unsigned attempt = 0; attempt < 3u; ++attempt) {
-        if (!vehicle_obstacle_scan_current(request)) return false;
+        if (!vehicle_obstacle_scan_current(request)) return;
         S5_PING ping = s5_hw_ping();
         unsigned range = ping.range_mm;
         vehicle_submit_obstacle_ping(ping);
-        if (s5_range_measured(range) || (open_last && range == S5_OPEN_RANGE)) return true;
+        if (s5_range_measured(range) || (open_last && range == S5_OPEN_RANGE)) return;
         open_last = range == S5_OPEN_RANGE;
         if (attempt + 1u < 3u) tk_dly_tsk(PING_INTERVAL_MS);
     }
-    return false;
-}
-
-static void confirm_pivot(S5_PROFILE *profile, uint32_t request)
-{
-    const unsigned angle = s5_servo_angle(profile->angle_offset_deg);
-    if (angle + 15u < S5_CENTRE_ANGLE || angle > S5_CENTRE_ANGLE + 15u ||
-        !vehicle_obstacle_scan_current(request)) return;
-
-    unsigned range = read_at((S5_SCAN_MAX_ANGLE - angle) / S5_FINE_STEP, FALSE, true, S5_UNKNOWN_RANGE);
-    aim(S5_CENTRE_ANGLE);
-    /* Use a conservative forward projection for bearings within 15 degrees. */
-    profile->pivot_confirmed = s5_same_obstacle(range, profile->nearest_mm) &&
-                               range * 9u / 10u >= S5_DEPARTURE_CLEARANCE_MM;
-    if (profile->pivot_confirmed)
-        tm_printf((UB*)"[S5] near-forward return verified at %u deg for the left pivot\n", angle);
 }
 
 static BOOL scan_obstacle(S5_PROFILE *profile, BOOL verbose, const uint32_t *request, unsigned limit_mm)
@@ -202,8 +186,7 @@ static BOOL scan_obstacle(S5_PROFILE *profile, BOOL verbose, const uint32_t *req
     profile->right_path_mm = read_at(S5_CENTRE_INDEX + BYPASS_SCAN_STEPS, verbose, true, S5_UNKNOWN_RANGE);
     if (request && !vehicle_obstacle_scan_current(*request)) goto cancelled;
     aim(S5_CENTRE_ANGLE);
-    if (request && !refresh_forward(*request) && s5_plan_bypass(profile).probe_left)
-        confirm_pivot(profile, *request);
+    if (request) refresh_forward(*request);
     tm_printf((UB*)"%s paths T(left %u deg)=%u mm R(right %u deg)=%u mm (4094=open, 4095=unavailable)\n",
               tag, S5_CENTRE_ANGLE + S5_CLEARANCE_BEARING_DEG, (unsigned)profile->left_path_mm,
               S5_CENTRE_ANGLE - S5_CLEARANCE_BEARING_DEG, (unsigned)profile->right_path_mm);
@@ -280,24 +263,27 @@ static void scan_task(INT stacd, void *exinf)
               S5_FOLLOW_STOP_MM, S5_FOLLOW_CLEAR_MM);
 
     for (;;) {
-        S5_PING ping = s5_hw_ping();
-        vehicle_submit_obstacle_ping(ping);
-        log_forward(ping, "forward");
         UINT events;
-        ER wake = tk_wai_flg(scan_event, SCAN_WAKE, TWF_ORW | TWF_BITCLR, &events, PING_INTERVAL_MS);
+        if (vehicle_obstacle_ranging_paused()) {
+            (void)tk_wai_flg(scan_event, SCAN_WAKE, TWF_ORW | TWF_BITCLR, &events, TMO_FEVR);
+            continue;
+        }
 
         uint32_t request;
         unsigned limit_mm;
-        if (wake == E_OK && vehicle_obstacle_scan_request(&request, &limit_mm)) {
+        if (vehicle_obstacle_scan_request(&request, &limit_mm)) {
             S5_PROFILE profile;
             BOOL scanned = scan_obstacle(&profile, FALSE, &request, limit_mm);
             vehicle_finish_obstacle_scan(scanned ? &profile : NULL, request);
-            /* The sweep finishes with a forward ping. */
+            /* Keep the normal interval after the scan's final ping. */
             tk_dly_tsk(PING_INTERVAL_MS);
-        } else if (wake != E_TMOUT) {
-            /* A canceled request must still respect the transducer's quiet time. */
-            tk_dly_tsk(PING_INTERVAL_MS);
+            continue;
         }
+
+        S5_PING ping = s5_hw_ping();
+        vehicle_submit_obstacle_ping(ping);
+        log_forward(ping, "forward");
+        (void)tk_wai_flg(scan_event, SCAN_WAKE, TWF_ORW | TWF_BITCLR, &events, PING_INTERVAL_MS);
     }
 }
 
@@ -421,7 +407,7 @@ EXPORT ER subsystem5_init(void)
     return E_OK;
 }
 
-void subsystem5_request_scan(void)
+void subsystem5_wake(void)
 {
 #ifdef CPU_RP2040
     if (scan_event > 0) (void)tk_set_flg(scan_event, SCAN_WAKE);

@@ -7,6 +7,6 @@
 
 #define S5_SERVO_PIN 12u
 
-void subsystem5_request_scan(void);
+void subsystem5_wake(void);
 
 #endif

@@ -20,7 +20,10 @@ typedef struct {
     uint32_t line_age_ms;
     S5_AVOID_INPUT avoidance;
 } VC_INPUT;
-typedef struct { unsigned state:3, reason:3, reposition_required:1; S5_AVOID avoidance; } VC_MODEL;
+typedef struct {
+    unsigned state:3, reason:3, reposition_required:1, await_forward_range:1;
+    S5_AVOID avoidance;
+} VC_MODEL;
 typedef struct {
     unsigned stop:1, left_rpm:7, right_rpm:7;
     S5_AVOID_OUTPUT maneuver;

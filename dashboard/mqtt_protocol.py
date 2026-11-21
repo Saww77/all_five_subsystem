@@ -15,7 +15,7 @@ AVOIDANCE_PHASES = (
     'idle', 'scanning ahead', 'turning off the tape', 'leaving the tape', 'aligning for the bypass',
     'passing the obstacle', 'turning toward the tape', 'searching for the tape', 'centring on the tape',
     'realigning with the tape', 'aligning to pass farther', 'complete', 'stopped',
-    'checking tape and forward range', 'backing up', 'waiting for a route', 'checking side clearance',
+    'confirming the tape', 'backing up', 'waiting for a route', 'checking side clearance',
 )
 AVOIDANCE_FAILURES = (
     None, 'Obstacle scan timed out', 'Obstacle could not be confirmed', 'Width could not be confirmed',

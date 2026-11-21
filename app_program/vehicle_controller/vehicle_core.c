@@ -30,10 +30,9 @@ static void halt(VC_MODEL *model, const VC_INPUT *in, VC_STATE state, VC_REASON 
 {
     if (vc_core_detouring(model)) {
         S5_PHASE phase = model->avoidance.phase;
-        if (!model->avoidance.depth &&
-            (phase == S5_PROFILE_PATH || phase == S5_WAIT_PATH ||
-             (((phase == S5_TURN_OUT && !model->avoidance.widening) || phase == S5_BACK_UP) &&
-              in->avoidance.motion == S5_MOTION_NONE))) {
+        if (phase == S5_PROFILE_PATH || phase == S5_WAIT_PATH ||
+            ((phase == S5_TURN_OUT || phase == S5_BACK_UP) &&
+             in->avoidance.motion == S5_MOTION_NONE)) {
             model->avoidance = (S5_AVOID){0};
         } else {
             S5_FAILURE failure = reason == VC_REASON_STOP ? S5_FAIL_STOP :
@@ -43,6 +42,7 @@ static void halt(VC_MODEL *model, const VC_INPUT *in, VC_STATE state, VC_REASON 
     }
     model->state = state;
     model->reason = reason;
+    model->await_forward_range = false;
 }
 
 void vc_core_step(VC_MODEL *m, const VC_INPUT *in, VC_OUTPUT *out)
@@ -66,6 +66,13 @@ void vc_core_step(VC_MODEL *m, const VC_INPUT *in, VC_OUTPUT *out)
     }
     if (in->line_stop) { halt(m, in, VC_IDLE, VC_REASON_LINE_STOP); return; }
 
+    /* Forward ranging resumes only once the tape is confirmed. Wait for a
+       fresh reading at that point before sending line-follow velocity. */
+    if (m->await_forward_range) {
+        if (!in->avoidance.range_valid) return;
+        m->await_forward_range = false;
+    }
+
     if (!vc_core_detouring(m) && in->obstacle_blocked) {
         s5_avoid_begin(&m->avoidance, in->avoidance.now);
         m->avoidance.reverse_available = in->avoidance.can_retrace;
@@ -75,16 +82,17 @@ void vc_core_step(VC_MODEL *m, const VC_INPUT *in, VC_OUTPUT *out)
         return; /* Stop the line-follow velocity before starting the scan. */
     }
     if (vc_core_detouring(m)) {
+        bool confirming_line = m->avoidance.phase == S5_CHECK_LINE;
         out->maneuver = s5_avoid_step(&m->avoidance, &in->avoidance);
         S5_PHASE phase = m->avoidance.phase;
         if (phase == S5_FAILED) { halt(m, in, VC_FAULT, VC_REASON_OBSTACLE); return; }
         if (phase == S5_COMPLETE) {
             m->state = VC_FOLLOW_LINE;
             m->reason = VC_REASON_NONE;
+            m->await_forward_range = confirming_line;
             return; /* Hand off using the next fresh line-follow command. */
         }
-        m->state = phase == S5_FIND_LINE || phase == S5_CENTER_LINE ||
-                   phase == S5_ALIGN_LINE || phase == S5_CHECK_LINE ?
+        m->state = phase == S5_FIND_LINE || phase == S5_ALIGN_LINE || phase == S5_CHECK_LINE ?
                    VC_RECOVER_LINE : VC_AVOIDING;
         out->stop = out->maneuver.action == S5_STOP;
         return;

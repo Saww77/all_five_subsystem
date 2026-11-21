@@ -169,10 +169,18 @@ function drawTelemetry(data) {
   faultList("vehicle-faults", vehicle?.fault_labels ?? [], Boolean(vehicle));
   const sonar = topics.sonar?.fresh ? topics.sonar.data : null;
   const scanning = sonar?.phase === "checking side clearance" || sonar?.phase === "scanning ahead";
+  const bypassing = ["turning off the tape", "leaving the tape", "aligning for the bypass",
+    "passing the obstacle", "turning toward the tape", "searching for the tape",
+    "realigning with the tape", "confirming the tape"].includes(sonar?.phase);
   const forward = typeof sonar?.forward_mm === "number" ? sonar.forward_mm + " mm" : sonar?.forward_mm ?? "Unavailable";
   const detour = sonar?.failure ? " · " + sonar.failure + " while " + sonar.failed_phase : "";
+  let sonarActivity = "Latest forward sonar: " + forward;
+  if (scanning) sonarActivity = "Sonar scan in progress";
+  else if (bypassing) sonarActivity = "Bypass in progress · " + sonar.phase;
+  else if (sonar?.phase === "complete" && sonar.forward_mm == null && vehicle?.state === "FOLLOW_LINE")
+    sonarActivity = "Tape reacquired. Waiting for forward sonar.";
   el("sonar-detail").hidden = sonar === null;
-  text("sonar-detail", sonar ? (scanning ? "Sonar scan in progress" : "Latest forward sonar: " + forward) + detour : null);
+  text("sonar-detail", sonar ? sonarActivity + detour : null);
   faultList("motor-faults", motion?.fault_labels ?? [], Boolean(motion));
   if (motion?.faults & 2 && controller?.timing_gap_us != null) {
     el("motor-faults").textContent += ` · Gap ${(controller.timing_gap_us/1000).toFixed(2)} ms / limit ${(controller.timing_limit_us/1000).toFixed(2)} ms`;

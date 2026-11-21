@@ -48,7 +48,6 @@ typedef struct {
     signed right_edge_mm : 13;
     unsigned left_edge_valid : 1;
     unsigned right_edge_valid : 1;
-    unsigned pivot_confirmed : 1; /* Near-forward return rechecked at the end of the sweep. */
 } S5_PROFILE;
 
 /* Index zero is the configured left endpoint, decreasing 5 degrees per sample. */
