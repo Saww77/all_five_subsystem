@@ -102,6 +102,18 @@ class TelemetryTests(unittest.TestCase):
         self.send('ack',b'\x04');self.assertEqual(self.d.snapshot()['last_ack']['command'],'reset')
         self.send('ack',b'\x06');self.assertTrue(self.d.snapshot()['last_ack']['rejected'])
 
+    def test_controller_stop_reason_distinguishes_local_ir_from_start_interlock(self):
+        packet = bytearray(31)
+        packet[:5] = bytes((2, 5, 3, 2, 1 | 2))
+        self.send('controller', packet)
+        report = self.d.snapshot()['telemetry']['controller']['data']
+        self.assertEqual(report['stop_reason_label'], 'Pico lost valid local IR samples.')
+        self.assertEqual(report['start_block_label'], 'Wi-Fi/MQTT not ready')
+        packet[2] = 6
+        self.send('controller', packet)
+        report = self.d.snapshot()['telemetry']['controller']['data']
+        self.assertEqual(report['stop_reason_label'], 'Obstacle avoidance stopped the car.')
+
     def test_subscribes_every_topic(self):
         result=[]
         client=SimpleNamespace(subscribe=lambda topics:(result.extend(topics) or (0,1)))

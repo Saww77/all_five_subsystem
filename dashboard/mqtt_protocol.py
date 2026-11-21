@@ -6,6 +6,11 @@ VEHICLE_FAULTS = ((1, 'Motor'), (2, 'Encoder'), (4, 'IMU'), (8, 'Ultrasonic echo
 TELEMETRY_TOPICS = ('vehicle', 'motion', 'line', 'terrain', 'obstacle', 'controller')
 START_BLOCK_REPOSITION = 8
 STOP_REASON_OPERATOR = 1
+STOP_REASONS = (
+    None, 'Operator STOP received.', 'Line follower requested a stop.',
+    'Pico lost valid local IR samples.', 'Motor control fault.',
+    'Command connection lost.', 'Obstacle avoidance stopped the car.',
+)
 
 def command_payload(command):
     if command == 'start': return b'\x01'
@@ -20,7 +25,7 @@ def decode_telemetry(kind, payload):
     word = int.from_bytes(payload, 'little')
     def bits(offset, width): return (word >> offset) & ((1 << width) - 1)
     if kind == 'controller':
-        if (payload[0],len(payload)) not in ((1,25),(2,31)) or payload[1] >= len(STATES) or payload[2] > 6 or payload[3] > 8 or payload[24] > 8 or (payload[0]==1 and payload[4] & 128) or payload[5] > 15:
+        if (payload[0],len(payload)) not in ((1,25),(2,31)) or payload[1] >= len(STATES) or payload[2] >= len(STOP_REASONS) or payload[3] > 8 or payload[24] > 8 or (payload[0]==1 and payload[4] & 128) or payload[5] > 15:
             raise ValueError('Invalid controller diagnostics')
         raw = [int.from_bytes(payload[i:i+2], 'little') for i in (6,8,10)]
         if max(raw)>1000 or max(payload[12:14])>126 or any(x%2 for x in payload[12:14]):
@@ -37,7 +42,8 @@ def decode_telemetry(kind, payload):
                  'Place the car on a straight away from crossings, then restart the Pico. The junction test remains halted until restart.',
                  'Place the car on a straight section of tape before retrying START.')
         age = int.from_bytes(payload[14:16], 'little')
-        return dict(state=STATES[payload[1]], stop_reason=payload[2], start_block=payload[3],
+        return dict(state=STATES[payload[1]], stop_reason=payload[2], stop_reason_label=STOP_REASONS[payload[2]],
+                    start_block=payload[3],
                     start_block_label=blocks[payload[3]], start_hint=hints[payload[3]],
                     motor_ready=bool(payload[4]&1), line_valid=bool(payload[4]&2),
                     line_stop=bool(payload[4]&4), obstacle_blocked=bool(payload[4]&8),

@@ -151,7 +151,7 @@ function drawTelemetry(data) {
   text("controller-detail", controller ? `IR darkness L/C/R: ${controller.left_dark} / ${controller.centre_dark} / ${controller.right_dark}. Target RPM L/R: ${controller.left_target_rpm} / ${controller.right_target_rpm}. Telemetry drops: ${controller.telemetry_drops}.` : "Waiting for live controller diagnostics.");
   const vehicle = topics.vehicle?.data;
   const motion = topics.motion?.data;
-  const line = topics.line?.data;
+  const line = topics.line?.fresh ? topics.line.data : null;
   const terrain = topics.terrain?.data;
   const obstacle = topics.obstacle?.data;
   text("mission-state", vehicle?.state.replaceAll("_", " "));
@@ -162,7 +162,10 @@ function drawTelemetry(data) {
     TURNING: "A turning mission state was reported.", AVOIDING: "An avoidance mission state was reported.",
     RECOVER_LINE: "A line-recovery mission state was reported."
   };
-  text("mission-description", vehicle ? topics.vehicle.fresh ? descriptions[vehicle.state] : "Last report only. Waiting for live mission telemetry." : "Waiting for a mission-state report.");
+  const stopped = vehicle?.state === "IDLE" || vehicle?.state === "FAULT";
+  const stopReason = stopped && diagnostic?.fresh && controller.state === vehicle.state
+    ? controller.stop_reason_label : null;
+  text("mission-description", vehicle ? topics.vehicle.fresh ? stopReason ?? descriptions[vehicle.state] : "Last report only. Waiting for live mission telemetry." : "Waiting for a mission-state report.");
   faultList("vehicle-faults", vehicle?.fault_labels ?? [], Boolean(vehicle));
   faultList("motor-faults", motion?.fault_labels ?? [], Boolean(motion));
   if (motion?.faults & 2 && controller?.timing_gap_us != null) {

@@ -229,6 +229,13 @@ static void test_link_loss_does_not_end_a_run(void)
     in.link_ok = false;
     step(&model, &in, &out, 20);
     assert(model.state == VC_FOLLOW_LINE && !out.stop && out.left_rpm == 30);
+
+    VC_MODEL lost_ir = model;
+    VC_INPUT missing_sample = in;
+    missing_sample.line_age_ms = VC_LINE_MAX_AGE_MS + 1;
+    step(&lost_ir, &missing_sample, &out, 20);
+    assert(out.stop && lost_ir.state == VC_FAULT && lost_ir.reason == VC_REASON_STALE_LINE);
+
     in.obstacle_blocked = true;
     in.avoidance.range_mm = 230;
     step(&model, &in, &out, 20);
