@@ -312,9 +312,23 @@ static void test_centered_box_edge_coordinates(void)
     assert(profile.front_mm > 200); /* Wide returns are outside the forward corridor. */
 }
 
+static void test_track_replay_sees_no_edge_on_either_side(void)
+{
+    const unsigned distances[] = {279, 259, 252, 251, 241, 233, 232, 233, 233, 227, 222, 221, 222,
+                                  220, 215, 223, 223, 223, 227, 221, 230, 220, 224, 234, 243};
+    S5_SCAN scan = {0};
+    for (unsigned i = 0; i < sizeof(distances) / sizeof(*distances); ++i)
+        s5_scan_set(&scan, i, distances[i]);
+    S5_PROFILE profile = s5_profile(&scan, 0, S5_SCAN_POINTS - 1u, S5_CENTRE_INDEX, NULL);
+    assert(profile.nearest_mm == 215 && profile.width_mm == 226);
+    assert(profile.left_clipped && profile.right_clipped &&
+           !profile.left_edge_valid && !profile.right_edge_valid);
+}
+
 int main(void)
 {
     test_centered_box_edge_coordinates();
+    test_track_replay_sees_no_edge_on_either_side();
     test_echo_pairing();
     test_rcwl_no_target();
     test_scan_and_profile();

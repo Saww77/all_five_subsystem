@@ -18,6 +18,7 @@
 #define PHASE_TIMEOUT_MS 9000u
 #define LONG_MOVE_TIMEOUT_MS 15000u
 #define RETURN_CHECK_TIMEOUT_MS 4500u
+#define MAX_FALL_TIMEOUT_PAUSES 3u
 #define RETURN_MARGIN_MM 70u
 #define RETURN_STOP_MM S5_TURN_CLEARANCE_MM
 #define RETURN_RESERVE_MM (RETURN_STOP_MM + 10u)
@@ -53,9 +54,22 @@ static S5_AVOID_OUTPUT go(S5_AVOID *state, S5_PHASE phase, uint32_t now)
     state->phase_at = now;
     state->line_samples = 0;
     state->last_line_at = now;
+    state->last_range_at = now;
+    state->range_seen = false;
+    state->echo_pauses = 0;
     state->leg_progress_mm = 0;
     state->issued_mm = state->waiting_echo = state->short_approach = 0;
     return (S5_AVOID_OUTPUT){.action = S5_WAIT};
+}
+
+static bool confirmed_forward(S5_AVOID *state, const S5_AVOID_INPUT *in)
+{
+    if (in->range_mm == S5_OPEN_RANGE) return true; /* The range gate already confirmed two pings. */
+    if (in->range_at == state->last_range_at) return false;
+    state->last_range_at = in->range_at;
+    bool confirmed = state->range_seen;
+    state->range_seen = true;
+    return confirmed;
 }
 
 void s5_avoid_abort(S5_AVOID *state, S5_FAILURE reason, uint32_t now)
@@ -410,15 +424,20 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
             state->scan_retried = true;
             return go(state, S5_PROFILE_PATH, in->now);
         }
-        if (!range_fresh || !at_or_after(in->range_at, state->phase_at)) return wait;
+        if (!range_fresh || !at_or_after(in->range_at, state->phase_at)) {
+            state->range_seen = false;
+            return wait;
+        }
         if (in->range_mm > clear_mm) {
+            if (!confirmed_forward(state, in)) return wait;
             clear_path_failure(state);
             return state->depth ? resume_leg(state, in, false) : go(state, S5_COMPLETE, in->now);
         }
+        state->range_seen = false;
         /* Allow one automatic retry if the forward echo returns or the
            measured clearance improves. A clear path can always resume above. */
         unsigned blocked = state->blocked_range_mm;
-        if (state->scan_retried ||
+        if (state->scan_retried || state->failure == S5_FAIL_BOTH_LIMITS ||
             (s5_range_measured(blocked) && in->range_mm < blocked + RESCAN_RANGE_CHANGE_MM)) return wait;
         if (elapsed >= RESCAN_INTERVAL_MS) {
             clear_path_failure(state);
@@ -436,22 +455,30 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
     bool probing = phase == S5_TURN_OUT && state->probe_left && !state->rolling_route;
     if (state->waiting_echo) {
         if (elapsed >= PHASE_TIMEOUT_MS) return fail(state, S5_FAIL_ECHO, in->now);
+        if (!range_fresh) state->range_seen = false;
         if (in->stopped && range_fresh && elapsed >= MOTION_SETTLE_MS &&
-            at_or_after(in->range_at, state->phase_at + MOTION_SETTLE_MS)) {
+            at_or_after(in->range_at, state->phase_at + MOTION_SETTLE_MS) && confirmed_forward(state, in)) {
             state->waiting_echo = false;
             state->phase_at = in->now - MOTION_SETTLE_MS;
         }
         return wait;
     }
-    if (!range_fresh && in->echo_quiet &&
+    bool fall_timeout_on_straight = forward && in->echo_fall_timeout;
+    if (!range_fresh && (in->echo_quiet || fall_timeout_on_straight) &&
         ((forward && in->motion != S5_MOTION_DONE) ||
          (in->motion == S5_MOTION_NONE && phase != S5_PROFILE_PATH && phase != S5_BACK_UP &&
           !(probing && proof_fresh)))) {
+        if (fall_timeout_on_straight) {
+            if (state->echo_pauses >= MAX_FALL_TIMEOUT_PAUSES) return fail(state, S5_FAIL_ECHO, in->now);
+            ++state->echo_pauses;
+        }
         unsigned progress = state->leg_progress_mm + accepted_progress(state, in);
         if (progress > S5_MAX_LEG_MM) return fail(state, S5_FAIL_MOTION, in->now);
         state->leg_progress_mm = progress;
         state->issued_mm = state->short_approach = 0;
         state->waiting_echo = true;
+        state->range_seen = false;
+        state->last_range_at = in->now;
         state->phase_at = in->now;
         return (S5_AVOID_OUTPUT){.action = moving ? S5_STOP : S5_WAIT};
     }
@@ -473,9 +500,11 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         if (!in->profile_valid || in->profile_at == state->phase_at ||
             !at_or_after(in->profile_at, state->phase_at) || !in->stopped) return wait;
         if (range_fresh && in->range_mm > clear_mm) {
+            if (s5_range_measured(in->profile.nearest_mm) && !confirmed_forward(state, in)) return wait;
             clear_path_failure(state);
             return state->depth ? resume_leg(state, in, false) : go(state, S5_COMPLETE, in->now);
         }
+        state->range_seen = false;
         S5_PROFILE profile = in->profile;
         if (range_fresh && in->range_mm < profile.front_mm) profile.front_mm = in->range_mm;
         S5_BYPASS plan = s5_plan_bypass(&profile);

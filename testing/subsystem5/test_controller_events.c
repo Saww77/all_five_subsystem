@@ -383,6 +383,9 @@ int main(void)
     clock_ms += 260;
     vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
     vehicle_submit_obstacle_range(860);
+    assert(work() > 0 && model.avoidance.waiting_echo && !queued_command);
+    clock_ms += 60;
+    vehicle_submit_obstacle_range(860);
     assert(work() > 0 && !model.avoidance.waiting_echo);
     vehicle_notify_feedback();
     assert(work() > 0 && (queued_command >> 4) == left_offset - 55);

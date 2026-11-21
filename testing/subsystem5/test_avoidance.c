@@ -326,6 +326,44 @@ static void test_profile_complete_but_forward_echo_missing(void)
     assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_PROFILE_PATH);
 }
 
+static void test_interrupted_pass_retains_distance(void)
+{
+    S5_AVOID state = {.phase = S5_PASS, .phase_at = 100, .next_pass_mm = 220, .issued_mm = 220};
+    S5_AVOID_INPUT in = {.now = 2000, .motion = S5_MOTION_PENDING, .travel_mm = 120,
+                        .echo_fall_timeout = true};
+    assert(s5_avoid_step(&state, &in).action == S5_STOP && state.phase == S5_PASS);
+    assert(state.waiting_echo && state.leg_progress_mm == 120);
+
+    in.motion = S5_MOTION_NONE;
+    in.stopped = in.range_valid = true;
+    in.echo_fall_timeout = false;
+    in.now = in.range_at = 2300;
+    in.range_mm = 1213;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.waiting_echo);
+    in.now += 10; /* Reusing the same observation must not release the hold. */
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.waiting_echo);
+    in.now = in.range_at = 2360;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && !state.waiting_echo);
+    S5_AVOID_OUTPUT next = s5_avoid_step(&state, &in);
+    assert(next.action == S5_ADVANCE && next.distance_mm == 100);
+}
+
+static void test_clipped_hold_ignores_interleaved_forward_outliers(void)
+{
+    S5_AVOID state = {.phase = S5_WAIT_PATH, .phase_at = 100, .failure = S5_FAIL_BOTH_LIMITS,
+                      .blocked_range_mm = 220};
+    S5_AVOID_INPUT in = {.now = 10000, .range_at = 10000, .stopped = true, .range_valid = true};
+    const unsigned observations[] = {400, 229, 258, 218, 235, 476, 230, 420};
+    for (unsigned i = 0; i < sizeof(observations) / sizeof(*observations); ++i) {
+        in.range_mm = observations[i];
+        in.range_at = ++in.now;
+        assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_WAIT_PATH);
+    }
+    in.range_mm = 420;
+    in.range_at = ++in.now;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_COMPLETE);
+}
+
 static void test_width_and_side_clearance(void)
 {
     S5_PROFILE scan = obstacle(true);
@@ -1158,6 +1196,8 @@ int main(void)
     test_unsafe_profile_and_scan_timeout();
     test_reentry_limit();
     test_profile_complete_but_forward_echo_missing();
+    test_interrupted_pass_retains_distance();
+    test_clipped_hold_ignores_interleaved_forward_outliers();
     test_width_and_side_clearance();
     test_centered_and_offset_boxes();
     test_bypass_with_estimated_edges();
