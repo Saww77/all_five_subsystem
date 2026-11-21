@@ -7,6 +7,7 @@
 #define NESTED_PASS_MARGIN_MM 130u
 #define NESTED_PASS_LIMIT_MM 600u
 #define RETRY_STEP_MM 60u
+#define SIDE_PROBE_STEP_MM 40u
 #define MIN_LEFT_STEP_MM 20u
 #define MOTION_SETTLE_MS 260u
 #define PIVOT_PROOF_MAX_AGE_MS 1500u
@@ -21,7 +22,7 @@
 #define RETURN_RESERVE_MM (RETURN_STOP_MM + 10u)
 #define ARC_FORWARD_MM ((S2_ARC_RADIUS_MM * 866u + 999u) / 1000u)
 #define ARC_SIDEWAYS_MM (S2_ARC_RADIUS_MM / 2u)
-#define ARC_ENTRY_MM (ARC_FORWARD_MM + S5_DEPARTURE_CLEARANCE_MM)
+#define ARC_ENTRY_MM (ARC_FORWARD_MM + S5_TURN_CLEARANCE_MM)
 #define DEPARTURE_DIAGONAL_MIN_MM 20u
 #define EDGE_OFFSET_DEADBAND_MM 20u
 
@@ -182,15 +183,6 @@ S5_BYPASS s5_plan_bypass(const S5_PROFILE *profile)
     plan.failure = S5_FAIL_NONE;
     plan.offset_mm = use_left ? left_offset : right_offset;
     plan.pass_mm = profile->nearest_mm + FIRST_SIDE_CHECK_MARGIN_MM;
-    unsigned heading = use_left ? profile->left_path_mm : profile->right_path_mm;
-    bool edge_valid = use_left ? profile->left_edge_valid : profile->right_edge_valid;
-    /* The first arc turns away from the box. Check its forward reach and the
-       diagonal route separately, since the second arc is already beside the box. */
-    plan.rounded_departure = !probe_left && edge_valid && profile->front_mm >= ARC_ENTRY_MM &&
-        plan.offset_mm >= 2u * ARC_SIDEWAYS_MM + DEPARTURE_DIAGONAL_MIN_MM &&
-        departure_forward_mm(plan.offset_mm) <= plan.pass_mm &&
-        s5_range_available(heading) &&
-        heading >= departure_diagonal_mm(plan.offset_mm) + ARC_ENTRY_MM;
     return plan;
 }
 
@@ -226,6 +218,7 @@ static S5_AVOID_OUTPUT avoid_on_leg(S5_AVOID *state, const S5_AVOID_INPUT *in)
         .next_pass_mm = state->next_pass_mm, .passed_mm = state->passed_mm,
         .progress_mm = progress, .line_goal_mm = line_goal,
         .additional_outward_mm = state->additional_outward_mm,
+        .rolling_route = state->rolling_route, .side_probe_used = state->side_probe_used,
     };
     state->side = S5_NO_SIDE;
     state->scan_retried = state->probe_left = false;
@@ -236,6 +229,7 @@ static S5_AVOID_OUTPUT avoid_on_leg(S5_AVOID *state, const S5_AVOID_INPUT *in)
     state->rear_clearance_pending = false;
     state->rounded_departure = false;
     state->rounded_return = false;
+    state->rolling_route = state->side_probe_used = state->side_probe_active = false;
     state->additional_outward_mm = 0;
     go(state, S5_PROFILE_PATH, in->now);
     return (S5_AVOID_OUTPUT){.action = S5_STOP};
@@ -265,6 +259,8 @@ static S5_AVOID_OUTPUT resume_leg(S5_AVOID *state, const S5_AVOID_INPUT *in, boo
     state->next_pass_mm = leg.next_pass_mm;
     state->passed_mm = leg.passed_mm;
     state->additional_outward_mm = leg.additional_outward_mm;
+    state->rolling_route = leg.rolling_route;
+    state->side_probe_used = leg.side_probe_used;
     state->reverse_available = state->reverse_long = state->scan_retried = state->probe_left = false;
     S5_PHASE phase = leg.phase;
     if (bypassed && returning_to_line(phase)) {
@@ -298,6 +294,7 @@ static S5_AVOID_OUTPUT finish_forward_leg(S5_AVOID *state, const S5_AVOID_INPUT 
         unsigned passed = state->passed_mm + state->leg_progress_mm;
         if (passed > S5_MAX_LEG_MM) return fail(state, S5_FAIL_MOTION, in->now);
         state->passed_mm = passed;
+        state->side_probe_active = false;
         /* Leave room for the forward-mounted IR sensor if a nested bypass
            ends very close to the true line. Continue past it, then face back. */
         if (state->depth == 1u && returning_to_line(state->interrupted[0].phase)) {
@@ -350,6 +347,18 @@ static S5_AVOID_OUTPUT search_farther_alongside(S5_AVOID *state, S5_PHASE next, 
     return go(state, next, now);
 }
 
+static S5_AVOID_OUTPUT probe_side_from_ahead(S5_AVOID *state, uint32_t now)
+{
+    unsigned reserve = state->rear_clearance_pending ? 0u : S5_REAR_CLEARANCE_MM;
+    unsigned budget_used = state->passed_mm + reserve;
+    if (state->side_probe_used || budget_used >= S5_MAX_PASS_MM)
+        return fail(state, S5_FAIL_ECHO, now);
+    unsigned remaining = S5_MAX_PASS_MM - budget_used;
+    state->side_probe_used = state->side_probe_active = true;
+    state->next_pass_mm = remaining < SIDE_PROBE_STEP_MM ? remaining : SIDE_PROBE_STEP_MM;
+    return go(state, S5_PASS, now);
+}
+
 S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
 {
     S5_PHASE phase = state->phase;
@@ -366,9 +375,13 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         if (elapsed >= RETURN_CHECK_TIMEOUT_MS) return fail(state, S5_FAIL_ECHO, in->now);
         if (!in->stopped || !in->return_received || !at_or_after(in->return_at, state->phase_at))
             return wait;
-        unsigned required = state->offset_mm + RETURN_MARGIN_MM;
+        unsigned margin = state->rolling_route && state->rear_clearance_pending ?
+                          S5_SIDE_ALLOWANCE_MM : RETURN_MARGIN_MM;
+        unsigned required = state->offset_mm + margin;
         if (in->return_clear_mm == S5_UNKNOWN_RANGE) {
-            if (state->return_scan_retried) return fail(state, S5_FAIL_ECHO, in->now);
+            if (state->return_scan_retried)
+                return state->rolling_route ? probe_side_from_ahead(state, in->now) :
+                                              fail(state, S5_FAIL_ECHO, in->now);
             /* Stay stopped and keep the original deadline for the replacement scan. */
             state->return_scan_retried = true;
             return (S5_AVOID_OUTPUT){.action = S5_RESCAN};
@@ -376,9 +389,9 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         if (in->return_clear_mm < required)
             return search_farther_alongside(state, S5_PASS, in->now);
         if (state->rear_clearance_pending) {
-            state->rounded_return =
-                state->offset_mm >= ARC_SIDEWAYS_MM + in->sensor_to_axle_mm + S5_SEARCH_MARGIN_MM &&
-                in->return_clear_mm >= state->offset_mm + S5_SIDE_ALLOWANCE_MM;
+            state->rounded_return = state->rolling_route ||
+                (state->offset_mm >= ARC_SIDEWAYS_MM + in->sensor_to_axle_mm + S5_SEARCH_MARGIN_MM &&
+                 in->return_clear_mm >= state->offset_mm + S5_SIDE_ALLOWANCE_MM);
             return go(state, S5_TURN_IN, in->now);
         }
         if (state->passed_mm + S5_REAR_CLEARANCE_MM > S5_MAX_PASS_MM)
@@ -412,8 +425,9 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
     bool arcing = (state->rounded_departure && (phase == S5_TURN_OUT || phase == S5_ALIGN_OUTSIDE)) ||
                   (state->rounded_return && (phase == S5_TURN_IN || phase == S5_ALIGN_LINE));
     bool moving = in->motion == S5_MOTION_QUEUED || in->motion == S5_MOTION_PENDING;
-    bool probing = phase == S5_TURN_OUT && state->probe_left;
+    bool probing = phase == S5_TURN_OUT && state->probe_left && !state->rolling_route;
     if (state->waiting_echo) {
+        if (elapsed >= PHASE_TIMEOUT_MS) return fail(state, S5_FAIL_ECHO, in->now);
         if (in->stopped && range_fresh && elapsed >= MOTION_SETTLE_MS &&
             at_or_after(in->range_at, state->phase_at + MOTION_SETTLE_MS)) {
             state->waiting_echo = false;
@@ -458,14 +472,20 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         if (range_fresh && in->range_mm < profile.front_mm) profile.front_mm = in->range_mm;
         S5_BYPASS plan = s5_plan_bypass(&profile);
         if (s5_range_available(profile.nearest_mm) && !range_fresh &&
-            !(plan.probe_left && proof_fresh)) return wait;
+            !(state->depth && plan.probe_left && proof_fresh)) return wait;
         if (plan.side != S5_NO_SIDE) {
             clear_path_failure(state);
             state->side = plan.side;
             state->probe_left = plan.probe_left;
             state->offset_mm = plan.offset_mm;
             state->next_pass_mm = state->depth ? profile.nearest_mm + NESTED_PASS_MARGIN_MM : plan.pass_mm;
-            state->rounded_departure = !state->depth && plan.rounded_departure;
+            state->rolling_route = state->rounded_departure = !state->depth;
+            if (state->rolling_route) {
+                unsigned minimum_offset = 2u * ARC_SIDEWAYS_MM + DEPARTURE_DIAGONAL_MIN_MM;
+                if (state->offset_mm < minimum_offset) state->offset_mm = minimum_offset;
+                unsigned advance = departure_forward_mm(state->offset_mm);
+                if (state->next_pass_mm < advance) state->next_pass_mm = advance;
+            }
             return go(state, S5_TURN_OUT, in->now);
         }
         S5_FAILURE reason = plan.failure;
@@ -529,7 +549,7 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
     if (moving && arcing && (!range_fresh || in->range_mm <= RETURN_STOP_MM))
         return fail(state, range_fresh ? S5_FAIL_CLOSE : S5_FAIL_ECHO, in->now);
     if (moving && forward && range_fresh && in->range_mm <= stop_distance)
-        return (state->widening || state->rounded_departure || state->rounded_return) ?
+        return (state->widening || state->rounded_departure || state->rounded_return || state->side_probe_active) ?
                fail(state, S5_FAIL_CLOSE, in->now) : avoid_on_leg(state, in);
     if (moving && (range_fresh ? in->range_mm < S5_TURN_CLEARANCE_MM : !(probing || in->echo_quiet)))
         return fail(state, range_fresh ? S5_FAIL_CLOSE : S5_FAIL_ECHO, in->now);
@@ -591,6 +611,15 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         if (arcing) {
             if (range_fresh && in->range_mm >= ARC_ENTRY_MM)
                 return (S5_AVOID_OUTPUT){.action = left ? S5_ARC_LEFT : S5_ARC_RIGHT};
+            if (state->rolling_route) {
+                if (phase != S5_TURN_OUT) return fail(state, S5_FAIL_CLOSE, in->now);
+                if (state->reverse_available && in->line_centered && !in->line_junction &&
+                    in->range_mm <= clear_mm - S5_REVERSE_MM) {
+                    state->reverse_available = state->reverse_long = false;
+                    return go(state, S5_BACK_UP, in->now);
+                }
+                return wait_for_path(state, S5_FAIL_ROOM, in);
+            }
             /* The first turn can fall back while still parallel. Once the
                diagonal heading is established, finish it with the matching arc. */
             if (phase == S5_TURN_OUT) state->rounded_departure = false;
@@ -601,6 +630,8 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
     }
     if (state->leg_progress_mm >= target) return finish_forward_leg(state, in);
     unsigned distance = target - state->leg_progress_mm;
+    if (state->rounded_departure && phase == S5_SHIFT_OUT && in->range_mm < distance + ARC_ENTRY_MM)
+        return fail(state, S5_FAIL_CLOSE, in->now);
     if (phase == S5_PASS && !state->depth && !state->passed_mm && !state->leg_progress_mm &&
         in->range_mm <= S5_SCAN_STOP_MM) {
         /* Start with the measured edge. Widen only when the live forward echo
@@ -625,7 +656,8 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
             return fail(state, S5_FAIL_CLOSE, in->now);
         if (distance > available) distance = available;
     } else if (in->range_mm <= S5_SCAN_STOP_MM) {
-        if (state->widening || state->rounded_departure) return fail(state, S5_FAIL_CLOSE, in->now);
+        if (state->widening || state->rounded_departure || state->side_probe_active)
+            return fail(state, S5_FAIL_CLOSE, in->now);
         unsigned buffer = S5_MANEUVER_STOP_MM + FRONT_MARGIN_MM;
         if (phase != S5_SHIFT_OUT || !state->probe_left || state->leg_progress_mm ||
             in->range_mm < buffer + MIN_LEFT_STEP_MM) return avoid_on_leg(state, in);

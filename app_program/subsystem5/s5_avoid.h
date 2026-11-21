@@ -78,7 +78,7 @@ typedef struct {
 typedef struct {
     unsigned phase:5, side:2, offset_mm:10, next_pass_mm:10;
     unsigned passed_mm:10, progress_mm:10, line_goal_mm:10;
-    unsigned additional_outward_mm:6;
+    unsigned additional_outward_mm:6, rolling_route:1, side_probe_used:1;
 } S5_INTERRUPTED_LEG;
 
 typedef struct {
@@ -90,7 +90,8 @@ typedef struct {
     unsigned leg_progress_mm:10, issued_mm:10, waiting_echo:1, short_approach:1;
     unsigned blocked_range_mm:12;
     unsigned widening:1, additional_outward_mm:6, rear_clearance_pending:1, rounded_return:1;
-    unsigned rounded_departure:1, return_scan_retried:1;
+    unsigned rounded_departure:1, return_scan_retried:1, rolling_route:1;
+    unsigned side_probe_used:1, side_probe_active:1;
 } S5_AVOID;
 typedef struct {
     uint16_t action : 4;
@@ -98,7 +99,7 @@ typedef struct {
 } S5_AVOID_OUTPUT;
 
 typedef struct {
-    unsigned side:2, failure:4, probe_left:1, rounded_departure:1;
+    unsigned side:2, failure:4, probe_left:1;
     unsigned offset_mm:9, pass_mm:9;
 } S5_BYPASS;
 

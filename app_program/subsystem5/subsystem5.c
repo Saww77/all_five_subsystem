@@ -384,13 +384,12 @@ static void bench_print_plan(const S5_PROFILE *profile)
     bench_print_clearance("right 45 deg", profile->right_path_mm);
     S5_BYPASS plan = s5_plan_bypass(profile);
     if (plan.side == S5_NO_SIDE) {
-        tm_printf((UB*)"[S5 BENCH] plan=STOP turn=0 deg reason=%u\n", (unsigned)plan.failure);
+        tm_printf((UB*)"[S5 BENCH] plan=STOP reason=%u\n", (unsigned)plan.failure);
         return;
     }
-    tm_printf((UB*)"[S5 BENCH] plan=%s turn=%u deg departure=%u mm lateral_offset=%u mm pass=%u mm\n",
+    tm_printf((UB*)"[S5 BENCH] preferred=%s estimated lateral clearance needed=%u mm\n",
               plan.side == S5_LEFT ? "T (left)" : "R (right)",
-              S5_LATERAL_TURN_DEG, (unsigned)plan.offset_mm,
-              (unsigned)plan.offset_mm, (unsigned)plan.pass_mm);
+              (unsigned)plan.offset_mm);
 }
 
 static void bench_task(INT stacd,void *exinf)

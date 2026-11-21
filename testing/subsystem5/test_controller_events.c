@@ -291,10 +291,18 @@ int main(void)
     clock_ms += 260;
     vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
     vehicle_submit_obstacle_range(196);
-    assert(work() > 0 && right_turn_count == 1);
+    assert(work() > 0 && right_turn_count == 0 && queued_command == (S2_ARC | (1u << 4)));
     assert(vehicle_get_snapshot(&snapshot) && snapshot.avoidance_phase == S5_TURN_OUT &&
            snapshot.width_mm == 294 && snapshot.avoidance_failure == S5_FAIL_NONE);
     motor_acknowledge(S2_REPLY_OK);
+    work();
+    uint32_t last_range_at = obstacle_range_at;
+    clock_ms += 60;
+    vehicle_submit_obstacle_ping(s5_classify_echo(S5_ECHO_QUIET, 0));
+    assert(obstacle_range_at == last_range_at);
+    assert(vehicle_get_snapshot(&snapshot) && snapshot.obstacle_forward_mm == 196 &&
+           !snapshot.obstacle_no_echo && vehicle_state() == VC_AVOIDING);
+    vehicle_submit_obstacle_range(1000);
     work();
     motor_stopped();
     work();
@@ -304,13 +312,33 @@ int main(void)
     assert(work() > 0 && queued_command && model.avoidance.phase == S5_SHIFT_OUT);
     motor_acknowledge(S2_REPLY_OK);
     work();
+    motor_stopped();
+    work();
+    clock_ms += 260;
+    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
+    vehicle_submit_obstacle_range(1000);
+    assert(work() > 0 && queued_command == S2_ARC);
+    motor_acknowledge(S2_REPLY_OK);
+    work();
+    motor_stopped();
+    work();
 
+    clock_ms += 260;
+    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
+    vehicle_submit_obstacle_range(1000);
+    assert(work() > 0 && queued_command && model.avoidance.phase == S5_PASS);
+    /* The mock reports 55 mm travelled, capped by the remaining straight move. */
+    unsigned covered = model.avoidance.leg_progress_mm;
+    unsigned requested = model.avoidance.issued_mm;
+    motor_acknowledge(S2_REPLY_OK);
+    work();
     scans_before = scan_count;
     unsigned stops_before = stop_count;
     vehicle_submit_obstacle_range(200);
     assert(work() > 0 && stop_count == stops_before + 1 && scan_count == scans_before);
     assert(!vehicle_obstacle_scan_request(&request, NULL, NULL));
-    assert(model.avoidance.depth == 1 && model.avoidance.interrupted[0].progress_mm == 55);
+    assert(model.avoidance.depth == 1 &&
+           model.avoidance.interrupted[0].progress_mm == covered + (requested < 55 ? requested : 55));
     motor_stopped();
     assert(work() > 0 && scan_count == scans_before + 1 && vehicle_obstacle_scan_request(&request, NULL, &scan_limit));
     assert(scan_limit == S5_CLEAR_MM);

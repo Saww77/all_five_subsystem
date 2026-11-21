@@ -39,6 +39,11 @@ static uint32_t obstacle_range_at, full_profile_at, scan_request_id;
 static S5_PROFILE full_profile;
 static uint32_t return_at;
 static unsigned return_clear_mm;
+static struct {
+    uint32_t sequence, issued_at, refreshed;
+    uint16_t command;
+    unsigned left_rpm:7, right_rpm:7, moving:1, velocity:1, retry:1, failed:1;
+} drive;
 
 static bool line_hit(void)
 {
@@ -201,10 +206,12 @@ static void submit_obstacle_reading(unsigned range, bool quiet)
 {
     if (!lock()) return;
     uint32_t now = now_ms();
-    /* Keep a recently verified clear reading for one missed pulse, with
-       its original timestamp. Quiet never clears a block or renews range. */
+    /* An arc may start inside the line-follow stop range. A recent reading
+       above the maneuver reserve can cover one quiet ping during that arc. */
+    bool arc_clear = (drive.command & 15u) == S2_ARC &&
+                     obstacle_range.range_mm > S5_MANEUVER_STOP_MM;
     bool hold = quiet && !pending.echo_quiet && s5_range_available(obstacle_range.range_mm) &&
-                !obstacle_range.blocked && now - obstacle_range_at <= VC_ECHO_GRACE_MS;
+                (!obstacle_range.blocked || arc_clear) && now - obstacle_range_at <= VC_ECHO_GRACE_MS;
     pending.echo_quiet = quiet;
     bool accepted = false;
     if (hold) obstacle_range.first_open = false;
@@ -350,11 +357,6 @@ BOOL vehicle_is_following(void)
 }
 void vehicle_record_telemetry_drop(void)
 { if(lock()){if(data.telemetry_drops!=0xffffffffu)data.telemetry_drops++;unlock();} }
-static struct {
-    uint32_t sequence, issued_at, refreshed;
-    uint16_t command;
-    unsigned left_rpm:7, right_rpm:7, moving:1, velocity:1, retry:1, failed:1;
-} drive;
 static bool tracking_straight;
 static uint32_t straight_since;
 static S5_MOTION drive_feedback(const S2_STATUS *status, const S2_REPLY *reply,
@@ -520,6 +522,7 @@ static TMO vehicle_service_once(void)
     unsigned depth = model.avoidance.depth;
     bool widening = model.avoidance.widening;
     bool rear_clearance_pending = model.avoidance.rear_clearance_pending;
+    bool side_probe = model.avoidance.side_probe_active;
     /* Serialize dispatch with the request latch, so STOP can cancel an entire
        batch before any later movement is submitted. */
     submit_output(&in, &out, &reply, vc_core_detouring(&model));
@@ -570,7 +573,9 @@ static TMO vehicle_service_once(void)
         tm_printf((UB*)"[S5] commanding %u deg rolling turn %s\n", S2_ARC_ANGLE_DEG,
                   out.maneuver.action == S5_ARC_LEFT ? "left" : "right");
     if (previous == S5_VERIFY_RETURN && phase == S5_PASS && in.avoidance.return_received) {
-        if (rear_clearance_pending)
+        if (side_probe)
+            tm_printf((UB*)"[S5] side echo unconfirmed, checking forward before moving %u mm to rescan\n", pass);
+        else if (rear_clearance_pending)
             tm_printf((UB*)"[S5] side clear, advancing %u mm before rechecking rear clearance\n", pass);
         else
             tm_printf((UB*)"[S5] return corridor obstructed at %u mm lateral, passing %u mm farther\n",
