@@ -116,6 +116,43 @@ static void reach_inward_turn(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out, boo
     assert(model->state == VC_RECOVER_LINE && model->avoidance.phase == S5_FIND_LINE);
 }
 
+static void tape_sample(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out,
+                        unsigned progress, bool near, bool far)
+{
+    bool left_bypass = model->avoidance.side == S5_LEFT;
+    in->avoidance.left_on_tape = left_bypass ? far : near;
+    in->avoidance.right_on_tape = left_bypass ? near : far;
+    in->avoidance.search_progress_mm = progress;
+    in->avoidance.line_at = in->avoidance.now + 20;
+    step(model, in, out, 20);
+}
+
+static void cross_tape_and_center(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out)
+{
+    unsigned nominal = model->avoidance.search_mm - S5_SEARCH_MARGIN_MM;
+    start_move(model, in, out, S5_ADVANCE, model->avoidance.search_mm);
+
+    tape_sample(model, in, out, nominal - 35, true, false);
+    assert(model->avoidance.left_edge.samples == 0 && model->avoidance.right_edge.samples == 0);
+    in->avoidance.near_original_line = true;
+    tape_sample(model, in, out, nominal - 28, true, false);
+    step(model, in, out, 20); /* Reused timestamp must not confirm the hit. */
+    assert(model->avoidance.left_edge.samples + model->avoidance.right_edge.samples == 1);
+    tape_sample(model, in, out, nominal - 26, true, false);
+    assert(model->avoidance.phase == S5_FIND_LINE && !out->stop);
+
+    tape_sample(model, in, out, nominal + 2, false, true);
+    assert(model->avoidance.phase == S5_FIND_LINE && !out->stop);
+    tape_sample(model, in, out, nominal + 4, false, true);
+    assert(model->avoidance.phase == S5_CENTER_LINE && out->maneuver.action == S5_STOP);
+    assert(model->avoidance.align_at_mm == nominal);
+    /* One more millimetre can be reported before the owner stops the search. */
+    in->avoidance.search_progress_mm = nominal + 5;
+    start_move(model, in, out, S5_REVERSE, 5);
+    end_move(model, in, out);
+    assert(model->avoidance.phase == S5_ALIGN_LINE);
+}
+
 static void test_rejoin(bool left, bool open_side)
 {
     VC_MODEL model = {0};
@@ -123,24 +160,7 @@ static void test_rejoin(bool left, bool open_side)
     VC_OUTPUT out;
     reach_inward_turn(&model, &in, &out, left, open_side);
     S5_ACTION outward = left ? S5_ARC_LEFT : S5_ARC_RIGHT;
-    unsigned travel = model.avoidance.search_mm;
-    start_move(&model, &in, &out, S5_ADVANCE, travel);
-    in.avoidance.line_hit = true;
-    in.avoidance.line_at = in.avoidance.now + 20;
-    step(&model, &in, &out, 20);
-    assert(model.avoidance.line_samples == 0); /* a marking too early is not the original line */
-    in.avoidance.near_original_line = true;
-    in.avoidance.line_junction = true; /* both outer sensors may cross together */
-    in.avoidance.line_at = in.avoidance.now + 20;
-    step(&model, &in, &out, 20);
-    assert(!out.stop);
-    step(&model, &in, &out, 20);
-    assert(!out.stop); /* the same reading can't confirm the line twice */
-    in.avoidance.line_at = in.avoidance.now + 20;
-    step(&model, &in, &out, 20);
-    assert(out.stop && out.maneuver.action == S5_STOP && model.avoidance.phase == S5_ALIGN_LINE);
-
-    in.avoidance.line_hit = in.avoidance.line_junction = false;
+    cross_tape_and_center(&model, &in, &out);
     start_move(&model, &in, &out, outward, 0);
     end_move(&model, &in, &out);
     assert(model.avoidance.phase == S5_CHECK_LINE);
@@ -149,7 +169,7 @@ static void test_rejoin(bool left, bool open_side)
     assert(model.state == VC_RECOVER_LINE && out.maneuver.action == S5_WAIT);
     step(&model, &in, &out, 20);
     assert(model.state == VC_RECOVER_LINE); /* crossing evidence cannot authorize handoff */
-    in.avoidance.line_center_seen = true;
+    in.avoidance.line_centered = true;
     in.avoidance.line_at = in.avoidance.now + 20;
     step(&model, &in, &out, 20);
     in.avoidance.line_at = in.avoidance.now + 20;
@@ -275,13 +295,13 @@ static void test_reentry_limit(void)
        confirmation and never issue the same bounded search again. */
     state = (S5_AVOID){.phase = S5_FIND_LINE, .side = S5_LEFT, .search_mm = 185};
     in.line_at = in.now;
-    in.line_hit = true;
+    in.right_on_tape = true;
     assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.search_exhausted);
     in.motion = S5_MOTION_NONE;
     ++in.now;
     assert(s5_avoid_step(&state, &in).action == S5_WAIT);
     in.line_at = in.now;
-    in.line_hit = false;
+    in.right_on_tape = false;
     assert(s5_avoid_step(&state, &in).action == S5_STOP && state.failure == S5_FAIL_LINE);
 }
 
@@ -469,8 +489,8 @@ static void test_lateral_bypass_at_start(void)
     end_move(&clear, &roomy, &out);
     start_move(&clear, &roomy, &out, S5_ARC_LEFT, 0);
     end_move(&clear, &roomy, &out);
-    assert(clear.avoidance.pass_mm == 309);
-    start_move(&clear, &roomy, &out, S5_ADVANCE, 309);
+    assert(clear.avoidance.pass_mm == 259);
+    start_move(&clear, &roomy, &out, S5_ADVANCE, 259);
     end_move(&clear, &roomy, &out);
     assert(clear.avoidance.phase == S5_TURN_IN);
 
@@ -687,8 +707,8 @@ static void test_rounded_bypass(bool left)
     end_move(&model, &in, &out);
     start_move(&model, &in, &out, inward, 0);
     end_move(&model, &in, &out);
-    assert(model.avoidance.offset_mm == plan.offset_mm && model.avoidance.pass_mm == 600 - 244);
-    start_move(&model, &in, &out, S5_ADVANCE, 600 - 244);
+    assert(model.avoidance.offset_mm == plan.offset_mm && model.avoidance.pass_mm == 560 - 244);
+    start_move(&model, &in, &out, S5_ADVANCE, 560 - 244);
     assert(model.avoidance.phase == S5_PASS);
     end_move(&model, &in, &out);
     assert(model.avoidance.phase == S5_TURN_IN);
@@ -696,22 +716,16 @@ static void test_rounded_bypass(bool left)
     start_move(&model, &in, &out, inward, 0);
     end_move(&model, &in, &out);
     assert(model.avoidance.search_mm == 237);
-    start_move(&model, &in, &out, S5_ADVANCE, 237);
-    in.avoidance.near_original_line = true;
-    in.avoidance.line_hit = true;
-    for (unsigned i = 0; i < 2; ++i) {
-        in.avoidance.line_at = in.avoidance.now + 20;
-        step(&model, &in, &out, 20);
-    }
-    assert(model.avoidance.phase == S5_ALIGN_LINE && out.maneuver.action == S5_STOP);
+    cross_tape_and_center(&model, &in, &out);
     start_move(&model, &in, &out, outward, 0);
     end_move(&model, &in, &out);
-    in.avoidance.line_hit = false;
-    in.avoidance.line_centered = true;
+    in.avoidance.line_hit = true;
+    in.avoidance.line_centered = false;
     in.avoidance.line_at = in.avoidance.now + 260;
     step(&model, &in, &out, 260);
     assert(model.state == VC_RECOVER_LINE && model.avoidance.line_samples == 0);
-    in.avoidance.line_center_seen = true;
+    in.avoidance.line_hit = false;
+    in.avoidance.line_centered = true;
     in.avoidance.line_at = in.avoidance.now + 20;
     step(&model, &in, &out, 20);
     step(&model, &in, &out, 20);
@@ -736,21 +750,28 @@ static void test_blank_floor_after_alignment_stops(void)
 
 static void test_tape_already_under_sensor_at_start_of_search(void)
 {
-    VC_MODEL model = {.state = VC_RECOVER_LINE, .avoidance = {
-        .phase = S5_FIND_LINE, .side = S5_LEFT, .offset_mm = 90,
-    }};
-    VC_INPUT in = track_input();
-    VC_OUTPUT out;
-    in.avoidance.near_original_line = true;
-    in.avoidance.line_hit = true;
-    in.avoidance.line_at = 260;
-    step(&model, &in, &out, 260);
-    assert(out.maneuver.action == S5_WAIT && model.avoidance.line_samples == 1);
-    step(&model, &in, &out, 20);
-    assert(out.maneuver.action == S5_WAIT && model.avoidance.line_samples == 1);
-    in.avoidance.line_at = 300;
-    step(&model, &in, &out, 20);
-    assert(out.stop && model.avoidance.phase == S5_ALIGN_LINE);
+    S5_AVOID state = {.phase = S5_FIND_LINE, .side = S5_LEFT, .search_mm = 90};
+    S5_AVOID_INPUT in = {.stopped = true, .near_original_line = true, .right_on_tape = true,
+                         .now = 260, .line_at = 260};
+    assert(s5_avoid_step(&state, &in).action == S5_ADVANCE && state.right_edge.samples == 1);
+    in.now = in.line_at = 270;
+    in.motion = S5_MOTION_PENDING;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.right_edge.samples == 2);
+    assert(state.phase == S5_FIND_LINE); /* The other edge has yet to cross. */
+}
+
+static void test_alignment_offset_bounds(void)
+{
+    S5_AVOID state = {.phase = S5_CENTER_LINE, .align_at_mm = 124, .search_progress_mm = 118};
+    S5_AVOID_INPUT in = {.stopped = true, .now = 260};
+    S5_AVOID_OUTPUT out = s5_avoid_step(&state, &in);
+    assert(out.action == S5_ADVANCE && out.distance_mm == 6);
+    in.motion = S5_MOTION_DONE;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_ALIGN_LINE);
+
+    state = (S5_AVOID){.phase = S5_CENTER_LINE, .align_at_mm = 124, .search_progress_mm = 180};
+    in.motion = S5_MOTION_NONE;
+    assert(s5_avoid_step(&state, &in).action == S5_STOP && state.failure == S5_FAIL_LINE);
 }
 
 static void test_plan_pass_distance(void)
@@ -758,20 +779,20 @@ static void test_plan_pass_distance(void)
     S5_PROFILE scan = obstacle(false);
     scan.nearest_mm = 220;
     scan.width_mm = 200;
-    assert(s5_planned_pass_mm(&scan, 230) == 590);
-    assert(s5_planned_pass_mm(&scan, 190) == 580);
+    assert(s5_planned_pass_mm(&scan, 230) == 550);
+    assert(s5_planned_pass_mm(&scan, 190) == 540);
     scan.width_status = S5_WIDTH_RIGHT_EDGE;
-    assert(s5_planned_pass_mm(&scan, 230) == 640);
+    assert(s5_planned_pass_mm(&scan, 230) == 590);
     scan.width_mm = 280;
-    assert(s5_planned_pass_mm(&scan, 230) == 695);
+    assert(s5_planned_pass_mm(&scan, 230) == 639);
     scan.width_mm = S5_UNKNOWN_WIDTH;
-    assert(s5_planned_pass_mm(&scan, 230) == 640);
+    assert(s5_planned_pass_mm(&scan, 230) == 590);
 
     VC_MODEL model = {0};
     VC_INPUT in = track_input();
     VC_OUTPUT out;
     scan = obstacle(false);
-    scan.width_mm = 340;
+    scan.width_mm = 405;
     profile(&model, &in, &out, scan);
     assert(model.avoidance.phase == S5_WAIT_PATH && model.avoidance.failure == S5_FAIL_ROOM);
     assert(out.maneuver.action == S5_WAIT);
@@ -794,7 +815,7 @@ static void test_compact_offset_still_rolls(void)
     end_move(&model, &in, &out);
     start_move(&model, &in, &out, S5_ARC_LEFT, 0);
     end_move(&model, &in, &out);
-    start_move(&model, &in, &out, S5_ADVANCE, 490 - 186);
+    start_move(&model, &in, &out, S5_ADVANCE, 472 - 186);
     end_move(&model, &in, &out);
     assert(model.avoidance.phase == S5_TURN_IN);
     start_move(&model, &in, &out, S5_ARC_LEFT, 0);
@@ -833,5 +854,6 @@ int main(void)
     test_compact_offset_still_rolls();
     test_blank_floor_after_alignment_stops();
     test_tape_already_under_sensor_at_start_of_search();
+    test_alignment_offset_bounds();
     puts("PASS rounded and tight-space bypasses, side clearance, tape confirmation and cancellation");
 }

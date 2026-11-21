@@ -7,6 +7,7 @@ static uint32_t clock_ms;
 static unsigned event_flags, stop_count, command_count, scan_count, clear_count;
 static unsigned ranging_wakes;
 static bool near_tape;
+static unsigned search_progress;
 static unsigned connection = 7;
 static bool motor_busy;
 static S2_STATUS motor;
@@ -38,6 +39,8 @@ unsigned s1_connection_status(void) { return connection; }
 uint32_t s2_core_timing_fault_gap_us(void) { return 0; }
 bool s2_core_distance_reached(unsigned mm, const S2_STATUS *status)
 { (void)mm; (void)status; return near_tape; }
+unsigned s2_core_distance_travelled_mm(const S2_STATUS *status)
+{ (void)status; return search_progress; }
 bool s2_core_maneuver_finished(unsigned arg, const S2_STATUS *status)
 { (void)arg; return s2_get_bits(status, 0, 2) == 0; }
 bool s2_core_arc_finished(bool right, const S2_STATUS *status)
@@ -76,7 +79,12 @@ bool motion_maneuver(unsigned mm, bool right, uint16_t *command)
     return true;
 }
 bool motion_maneuver_reverse(unsigned mm, uint16_t *command)
-{ (void)mm; (void)command; assert(0); return false; }
+{
+    assert(!queued_command && mm);
+    *command = queued_command = (uint16_t)(S2_MANEUVER | ((S2_MANEUVER_REVERSE_BASE + mm) << 4));
+    motor_busy = true;
+    return true;
+}
 bool motion_arc(bool right, uint16_t *command)
 {
     assert(!queued_command);
@@ -317,7 +325,7 @@ int main(void)
     complete_move();
 
     settle_step();
-    assert(model.avoidance.phase == S5_PASS && (queued_command >> 4) == 196 + 294 + 160 - 209);
+    assert(model.avoidance.phase == S5_PASS && (queued_command >> 4) == 196 + 236 + 160 - 209);
     complete_move();
     settle_step();
     assert(model.avoidance.phase == S5_TURN_IN && queued_command == S2_ARC);
@@ -328,14 +336,29 @@ int main(void)
     motor_acknowledge(S2_REPLY_OK);
     work();
     near_tape = true;
+    search_progress = 100;
+    for (unsigned i = 0; i < 2; ++i) {
+        clock_ms += 10;
+        vehicle_submit_line(850, 0, 26, 30, 30, FALSE, 0);
+        work();
+    }
+    assert(model.avoidance.phase == S5_FIND_LINE && motor_busy);
+
+    search_progress = 130;
     for (unsigned i = 0; i < 2; ++i) {
         clock_ms += 10;
         vehicle_submit_line(108, 0, 850, 30, 30, FALSE, 0);
         work();
     }
-    assert(model.avoidance.phase == S5_ALIGN_LINE && !queued_command);
+    assert(model.avoidance.phase == S5_CENTER_LINE && !queued_command);
+    assert(model.avoidance.align_at_mm == 128);
+    search_progress = 133;
     motor_stopped();
     work();
+    settle_step();
+    assert((queued_command >> 4) == S2_MANEUVER_REVERSE_BASE + 5);
+    complete_move();
+    assert(model.avoidance.phase == S5_ALIGN_LINE);
     settle_step();
     assert(queued_command == (S2_ARC | (1u << 4)));
     complete_move();

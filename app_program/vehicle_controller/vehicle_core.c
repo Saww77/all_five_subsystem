@@ -92,7 +92,8 @@ void vc_core_step(VC_MODEL *m, const VC_INPUT *in, VC_OUTPUT *out)
             m->await_forward_range = confirming_line;
             return; /* Hand off using the next fresh line-follow command. */
         }
-        m->state = phase == S5_FIND_LINE || phase == S5_ALIGN_LINE || phase == S5_CHECK_LINE ?
+        m->state = phase == S5_FIND_LINE || phase == S5_CENTER_LINE ||
+                   phase == S5_ALIGN_LINE || phase == S5_CHECK_LINE ?
                    VC_RECOVER_LINE : VC_AVOIDING;
         out->stop = out->maneuver.action == S5_STOP;
         return;

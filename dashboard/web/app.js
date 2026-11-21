@@ -170,7 +170,7 @@ function drawTelemetry(data) {
   const sonar = topics.sonar?.fresh ? topics.sonar.data : null;
   const scanning = sonar?.phase === "checking side clearance" || sonar?.phase === "scanning ahead";
   const bypassing = ["turning off the tape", "leaving the tape", "aligning for the bypass",
-    "passing the obstacle", "turning toward the tape", "searching for the tape",
+    "passing the obstacle", "turning toward the tape", "searching for the tape", "centring on the tape",
     "realigning with the tape", "confirming the tape"].includes(sonar?.phase);
   const forward = typeof sonar?.forward_mm === "number" ? sonar.forward_mm + " mm" : sonar?.forward_mm ?? "Unavailable";
   const detour = sonar?.failure ? " · " + sonar.failure + " while " + sonar.failed_phase : "";

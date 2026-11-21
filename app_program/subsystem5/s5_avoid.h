@@ -9,7 +9,10 @@
 #define S5_SLOW_RANGE_MM 500u
 #define S5_MANEUVER_STOP_MM 150u
 #define S5_PASS_BODY_ALLOWANCE_MM 160u
-#define S5_PASS_UNCERTAIN_DEPTH_MM 250u
+#ifndef S5_PASS_DEPTH_PERCENT
+#define S5_PASS_DEPTH_PERCENT 80u
+#endif
+#define S5_PASS_UNCERTAIN_DEPTH_MM 200u
 #define S5_MAX_PASS_MM 720u
 #define S5_APPROACH_RPM 20u
 #define S5_CLEARANCE_BEARING_DEG 45u
@@ -27,10 +30,13 @@
 #define S5_LONG_REVERSE_MM 60u
 #define S5_SEARCH_MARGIN_MM 40u
 #define S5_MAX_LEG_MM 900u
+#ifndef S5_TAPE_WIDTH_MM
+#define S5_TAPE_WIDTH_MM 18u
+#endif
 
 typedef enum {
     S5_OFF, S5_PROFILE_PATH, S5_TURN_OUT, S5_SHIFT_OUT, S5_ALIGN_OUTSIDE,
-    S5_PASS, S5_TURN_IN, S5_FIND_LINE, S5_ALIGN_LINE = 9,
+    S5_PASS, S5_TURN_IN, S5_FIND_LINE, S5_CENTER_LINE, S5_ALIGN_LINE,
     /* Keep the phase numbers stable for MQTT diagnostics. */
     S5_COMPLETE = 11, S5_FAILED, S5_CHECK_LINE, S5_BACK_UP, S5_WAIT_PATH
 } S5_PHASE;
@@ -53,17 +59,25 @@ typedef struct {
     S5_PROFILE profile;
     unsigned range_mm : 12;
     unsigned sensor_to_axle_mm : 9;
+    unsigned search_progress_mm : 10;
     unsigned motion : 3;
     bool stopped : 1, range_valid : 1, profile_valid : 1;
     bool line_hit : 1, line_junction : 1, line_centered : 1, can_retrace : 1;
     bool near_original_line : 1, can_retrace_far : 1, line_center_seen : 1, retry_scan : 1;
+    bool left_on_tape : 1, right_on_tape : 1;
 } S5_AVOID_INPUT;
+typedef struct {
+    unsigned entry_mm:10, samples:2;
+} S5_TAPE_EDGE;
+
 typedef struct {
     uint32_t phase_at, last_line_at, last_range_at;
     unsigned phase:5, side:2, line_samples:2, reverse_available:1;
     unsigned reverse_long:1, scan_retried:1, scan_after_retrace:1, failure:4, failed_phase:5;
     unsigned offset_mm:10, diagonal_mm:10, pass_mm:10, search_mm:10, search_after_mm:10;
+    unsigned align_at_mm:10, search_progress_mm:10;
     unsigned blocked_range_mm:12, range_seen:1, search_exhausted:1;
+    S5_TAPE_EDGE left_edge, right_edge;
 } S5_AVOID;
 typedef struct {
     uint16_t action : 4;

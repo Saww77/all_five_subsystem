@@ -15,8 +15,11 @@
 #define DEPARTURE_DIAGONAL_MIN_MM 20u
 #define MIN_ROUNDED_OFFSET_MM (2u * ARC_SIDEWAYS_MM + DEPARTURE_DIAGONAL_MIN_MM)
 #define EDGE_OFFSET_DEADBAND_MM 20u
+#define LINE_ALIGN_TOLERANCE_MM 3
 
 _Static_assert(S2_ARC_ANGLE_DEG == 60u, "Return offset projections use a 60 degree arc");
+_Static_assert(S5_PASS_DEPTH_PERCENT > 0u && S5_PASS_DEPTH_PERCENT <= 100u,
+               "Estimated depth must be a percentage of the measured width");
 _Static_assert(S5_FOLLOW_CLEAR_MM + S5_PASS_UNCERTAIN_DEPTH_MM + S5_PASS_BODY_ALLOWANCE_MM <= S5_MAX_PASS_MM,
                "The conservative default depth must fit the bypass budget");
 _Static_assert(S5_FOLLOW_CLEAR_MM + S5_LONG_REVERSE_MM <= S5_MAX_PROJECTED_FRONT_MM,
@@ -97,14 +100,14 @@ bool s5_avoid_executing(S5_PHASE phase)
 
 unsigned s5_planned_pass_mm(const S5_PROFILE *profile, unsigned forward_mm)
 {
-    /* The width bounds the box depth for this course. Reserve enough travel
-       for the rear of the chassis to get beyond the box before turning. */
-    unsigned depth = profile->width_mm;
-    if (!depth || depth == S5_UNKNOWN_WIDTH) {
-        depth = S5_PASS_UNCERTAIN_DEPTH_MM;
-    } else if (profile->width_status != S5_WIDTH_OK) {
-        depth += S5_UNCERTAIN_EDGE_MM;
-        if (depth < S5_PASS_UNCERTAIN_DEPTH_MM) depth = S5_PASS_UNCERTAIN_DEPTH_MM;
+    /* Estimate the shallow box depth separately from the chassis allowance. */
+    unsigned depth = S5_PASS_UNCERTAIN_DEPTH_MM;
+    if (profile->width_mm && profile->width_mm != S5_UNKNOWN_WIDTH) {
+        depth = (profile->width_mm * S5_PASS_DEPTH_PERCENT + 99u) / 100u;
+        if (profile->width_status != S5_WIDTH_OK) {
+            depth += S5_UNCERTAIN_EDGE_MM;
+            if (depth < S5_PASS_UNCERTAIN_DEPTH_MM) depth = S5_PASS_UNCERTAIN_DEPTH_MM;
+        }
     }
     unsigned gap = profile->nearest_mm;
     if (s5_range_measured(forward_mm) && forward_mm > gap) gap = forward_mm;
@@ -209,6 +212,77 @@ static void observe_line(S5_AVOID *state, const S5_AVOID_INPUT *in, bool seen, u
     }
 }
 
+static void record_tape_edge(S5_TAPE_EDGE *edge, bool dark, unsigned progress_mm)
+{
+    if (edge->samples == 2) return;
+    if (!dark) {
+        edge->samples = 0;
+        return;
+    }
+    if (!edge->samples) edge->entry_mm = progress_mm;
+    ++edge->samples;
+}
+
+static bool tape_edges_confirmed(const S5_AVOID *state)
+{
+    return state->left_edge.samples == 2 && state->right_edge.samples == 2;
+}
+
+static S5_AVOID_OUTPUT find_tape(S5_AVOID *state, const S5_AVOID_INPUT *in, bool settled)
+{
+    if (in->search_progress_mm > state->search_progress_mm)
+        state->search_progress_mm = in->search_progress_mm;
+    if (in->motion == S5_MOTION_DONE) state->search_exhausted = true;
+    if ((in->near_original_line || state->search_exhausted) &&
+        at_or_after(in->line_at, state->phase_at) && in->line_at != state->last_line_at) {
+        state->last_line_at = in->line_at;
+        record_tape_edge(&state->left_edge, in->left_on_tape, state->search_progress_mm);
+        record_tape_edge(&state->right_edge, in->right_on_tape, state->search_progress_mm);
+    }
+
+    if (tape_edges_confirmed(state)) {
+        unsigned near = state->side == S5_LEFT ? state->right_edge.entry_mm : state->left_edge.entry_mm;
+        unsigned far = state->side == S5_LEFT ? state->left_edge.entry_mm : state->right_edge.entry_mm;
+        /* The sensor nearer the tape must cross first on the 60-degree approach. */
+        if (far <= near || far - near > diagonal_distance_mm(S5_CHASSIS_WIDTH_MM / 2u))
+            return fail(state, S5_FAIL_LINE, in->now);
+        /* Averaging the entries cancels the side offsets of the front sensors.
+           Move from the leading edge to the stripe centre, compensate for the
+           sensor-to-axle distance, and reserve the final arc's lateral travel. */
+        unsigned stripe_center_mm = (near + far + 1u) / 2u +
+                                    diagonal_distance_mm((S5_TAPE_WIDTH_MM + 1u) / 2u);
+        int turn_start_mm = (int)(stripe_center_mm + in->sensor_to_axle_mm) -
+                            (int)diagonal_distance_mm(ARC_SIDEWAYS_MM);
+        if (turn_start_mm < 0 || (unsigned)turn_start_mm > S5_MAX_LEG_MM)
+            return fail(state, S5_FAIL_LINE, in->now);
+        state->align_at_mm = (unsigned)turn_start_mm;
+        go(state, S5_CENTER_LINE, in->now);
+        return (S5_AVOID_OUTPUT){.action = S5_STOP};
+    }
+
+    if (state->search_exhausted && state->left_edge.samples != 1 && state->right_edge.samples != 1)
+        return fail(state, S5_FAIL_LINE, in->now);
+    if (!state->search_exhausted && settled && in->motion == S5_MOTION_NONE)
+        return advance(state->search_mm);
+    return (S5_AVOID_OUTPUT){.action = S5_WAIT};
+}
+
+static S5_AVOID_OUTPUT center_for_turn(S5_AVOID *state, const S5_AVOID_INPUT *in, bool settled)
+{
+    if (in->motion == S5_MOTION_DONE) return go(state, S5_ALIGN_LINE, in->now);
+    if (!settled || in->motion != S5_MOTION_NONE) return (S5_AVOID_OUTPUT){.action = S5_WAIT};
+
+    unsigned progress = in->search_progress_mm > state->search_progress_mm ?
+                        in->search_progress_mm : state->search_progress_mm;
+    int adjustment = (int)state->align_at_mm - (int)progress;
+    if (adjustment >= -LINE_ALIGN_TOLERANCE_MM && adjustment <= LINE_ALIGN_TOLERANCE_MM)
+        return go(state, S5_ALIGN_LINE, in->now);
+    unsigned distance = (unsigned)(adjustment < 0 ? -adjustment : adjustment);
+    if (distance > S5_SEARCH_MARGIN_MM) return fail(state, S5_FAIL_LINE, in->now);
+    return (S5_AVOID_OUTPUT){.action = adjustment < 0 ? S5_REVERSE : S5_ADVANCE,
+                             .distance_mm = distance};
+}
+
 static S5_AVOID_OUTPUT execute_route(S5_AVOID *state, const S5_AVOID_INPUT *in)
 {
     S5_PHASE phase = state->phase;
@@ -218,29 +292,20 @@ static S5_AVOID_OUTPUT execute_route(S5_AVOID *state, const S5_AVOID_INPUT *in)
                        LONG_MOVE_TIMEOUT_MS : PHASE_TIMEOUT_MS;
     S5_AVOID_OUTPUT wait = {.action = S5_WAIT};
     if (elapsed >= timeout)
-        return fail(state, phase == S5_CHECK_LINE || phase == S5_FIND_LINE ?
+        return fail(state, phase == S5_CHECK_LINE || phase == S5_FIND_LINE || phase == S5_CENTER_LINE ?
                     S5_FAIL_LINE : S5_FAIL_PHASE_TIMEOUT, in->now);
 
     if (phase == S5_CHECK_LINE) {
         if (!settled) return wait;
         if (in->line_junction) return fail(state, S5_FAIL_LINE, in->now);
-        /* Two light outer sensors can also mean the car is on blank floor. */
-        observe_line(state, in, in->line_center_seen || in->line_hit, state->phase_at + MOTION_SETTLE_MS);
+        /* The measured crossing supplies tape evidence while the outer sensors straddle it. */
+        observe_line(state, in, tape_edges_confirmed(state) && in->line_centered,
+                     state->phase_at + MOTION_SETTLE_MS);
         return state->line_samples >= 2 ? go(state, S5_COMPLETE, in->now) : wait;
     }
 
-    if (phase == S5_FIND_LINE) {
-        if (in->motion == S5_MOTION_DONE) state->search_exhausted = true;
-        if (in->near_original_line || state->search_exhausted)
-            observe_line(state, in, in->line_hit, state->phase_at);
-        if (state->line_samples >= 2) {
-            go(state, S5_ALIGN_LINE, in->now);
-            return (S5_AVOID_OUTPUT){.action = S5_STOP};
-        }
-        if (state->search_exhausted)
-            return state->line_samples ? wait : fail(state, S5_FAIL_LINE, in->now);
-        if (state->line_samples) return wait;
-    }
+    if (phase == S5_FIND_LINE) return find_tape(state, in, settled);
+    if (phase == S5_CENTER_LINE) return center_for_turn(state, in, settled);
 
     if (in->motion == S5_MOTION_DONE) {
         switch (phase) {
@@ -258,7 +323,6 @@ static S5_AVOID_OUTPUT execute_route(S5_AVOID *state, const S5_AVOID_INPUT *in)
     switch (phase) {
     case S5_SHIFT_OUT: return advance(state->diagonal_mm);
     case S5_PASS: return state->pass_mm ? advance(state->pass_mm) : go(state, S5_TURN_IN, in->now);
-    case S5_FIND_LINE: return advance(state->search_mm);
     case S5_TURN_OUT: case S5_ALIGN_OUTSIDE: case S5_TURN_IN: case S5_ALIGN_LINE: {
         bool outward = phase == S5_TURN_OUT || phase == S5_ALIGN_LINE;
         bool left = outward ? state->side == S5_LEFT : state->side == S5_RIGHT;

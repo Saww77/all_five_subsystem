@@ -157,6 +157,8 @@ static VC_INPUT controller_input(BOOL ready, BOOL linked, unsigned faults, bool 
             .profile = full_profile, .profile_valid = pending.profile_valid,
             .retry_scan = pending.start,
             .line_at = data.line_timestamp_ms, .line_hit = line_hit(),
+            .left_on_tape = data.l >= S5_RECOVERY_LINE_DARK,
+            .right_on_tape = data.r >= S5_RECOVERY_LINE_DARK,
             .line_center_seen = data.c >= S5_RECOVERY_LINE_DARK,
             .line_junction = data.l >= S5_WIDE_MARKING && data.r >= S5_WIDE_MARKING,
             .sensor_to_axle_mm = S5_IR_TO_AXLE_MM,
@@ -423,6 +425,7 @@ static const char *const avoidance_phase_name[] = {
     [S5_PASS] = "passing obstacle",
     [S5_TURN_IN] = "turning toward original line",
     [S5_FIND_LINE] = "searching for the line",
+    [S5_CENTER_LINE] = "positioning for the final arc",
     [S5_ALIGN_LINE] = "realigning with the line",
     [S5_COMPLETE] = "line reacquired, resuming line following",
     [S5_FAILED] = "detour stopped",
@@ -455,6 +458,14 @@ static TMO vehicle_service_once(void)
         bool distance_command = in.avoidance.motion == S5_MOTION_PENDING || in.avoidance.motion == S5_MOTION_DONE;
         in.avoidance.near_original_line = !min_cross_mm ||
               (distance_command && s2_core_distance_reached(min_cross_mm, &status));
+        if (distance_command) {
+            unsigned progress = s2_core_distance_travelled_mm(&status);
+            in.avoidance.search_progress_mm = progress <= S5_MAX_LEG_MM ? progress : S5_MAX_LEG_MM;
+        }
+    } else if (model.avoidance.phase == S5_CENTER_LINE && in.avoidance.motion == S5_MOTION_NONE) {
+        /* STOP preserves the search command's encoder counts until another move starts. */
+        unsigned progress = s2_core_distance_travelled_mm(&status);
+        in.avoidance.search_progress_mm = progress <= S5_MAX_LEG_MM ? progress : S5_MAX_LEG_MM;
     }
     bool straight = model.state == VC_FOLLOW_LINE && in.avoidance.line_centered &&
                     in.left_rpm == in.right_rpm &&
@@ -501,6 +512,9 @@ static TMO vehicle_service_once(void)
     unsigned side = model.avoidance.side;
     unsigned offset = model.avoidance.offset_mm;
     unsigned pass = model.avoidance.pass_mm;
+    unsigned left_entry = model.avoidance.left_edge.entry_mm;
+    unsigned right_entry = model.avoidance.right_edge.entry_mm;
+    unsigned align_at = model.avoidance.align_at_mm;
     bool executing = s5_avoid_executing(phase);
     if (executing && !was_executing) {
         /* The next forward range must be from the new heading after rejoining. */
@@ -557,6 +571,9 @@ static TMO vehicle_service_once(void)
         if (phase == S5_TURN_OUT)
             tm_printf((UB*)"[S5] planned bypass %s, sideways target=%u mm, straight pass=%u mm\n",
                       side == S5_LEFT ? "T (left)" : "R (right)", offset, pass);
+        if (phase == S5_CENTER_LINE)
+            tm_printf((UB*)"[S5] tape crossings left=%u mm right=%u mm, final arc starts at %u mm\n",
+                      left_entry, right_entry, align_at);
         if (phase == S5_FAILED || phase == S5_WAIT_PATH)
             tm_printf((UB*)"[S5] stopped during %s, detour reason=%u vehicle reason=%u, "
                           "range=%u mm, echo state=%u, motor faults=%u, encoder L=%u R=%u\n",
