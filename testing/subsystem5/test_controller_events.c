@@ -360,18 +360,18 @@ int main(void)
         vehicle_submit_line(108, 0, 200, 30, 30, FALSE, 0);
         work();
     }
-    assert(model.avoidance.align_at_mm == 102);
+    assert(model.avoidance.align_at_mm == 96);
     assert(model.avoidance.phase == S5_FIND_LINE && motor_busy && stop_count == stops_before_rejoin);
-    search_progress = 101;
+    search_progress = 95;
     vehicle_notify_feedback();
     work();
     assert(model.avoidance.phase == S5_FIND_LINE && motor_busy && stop_count == stops_before_rejoin);
 
-    search_progress = 102;
+    search_progress = 96;
     vehicle_notify_feedback();
     work();
     assert(model.avoidance.phase == S5_CENTER_LINE && !queued_command && stop_count == stops_before_rejoin + 1);
-    search_progress = 103;
+    search_progress = 97;
     motor_stopped();
     work();
     settle_step();
