@@ -56,10 +56,13 @@
 #include "app.h"
 #include "vehicle_controller/vehicle_controller.h"
 
-#if APP_S5_BENCH
+#if APP_S5_BENCH || APP_IR_BENCH
 #include "subsystem2/motion_hw.h"
 #elif APP_MOTION_AUTOTEST
 IMPORT ER subsystem2_autotest_start(void);
+#endif
+#if APP_IR_BENCH
+#include "subsystem3/subsystem3.h"
 #endif
 
 /*
@@ -101,7 +104,11 @@ EXPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name)
 
 EXPORT INT usermain(void)
 {
-#if APP_S5_BENCH
+#if APP_IR_BENCH
+	s2_hw_safe_outputs();
+	ir_bench_run();
+	for (;;) { (void)tk_slp_tsk(TMO_FEVR); }
+#elif APP_S5_BENCH
 	s2_hw_safe_outputs();
 	CHECK(subsystem5_start(), "sonar bench startup");
 	for (;;) { (void)tk_slp_tsk(TMO_FEVR); }
