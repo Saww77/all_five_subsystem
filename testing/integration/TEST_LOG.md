@@ -5,7 +5,8 @@ The motion recovery regression compiles the production steering and controller l
 ```sh
 cc -std=c11 -Wall -Wextra -Werror testing/integration/test_motion_recovery.c \
   app_program/subsystem3/line_steering.c \
-  app_program/vehicle_controller/vehicle_core.c -o /tmp/test_motion_recovery
+  app_program/vehicle_controller/vehicle_core.c app_program/subsystem5/s5_avoid.c \
+  -o /tmp/test_motion_recovery
 /tmp/test_motion_recovery
 ```
 

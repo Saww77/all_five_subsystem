@@ -33,6 +33,9 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(decode_telemetry('terrain',(125|(2<<11)).to_bytes(2,'little')),dict(height_mm=125,phase=2))
         obstacle=(500|(80<<12)|(200<<23)|(300<<35)).to_bytes(6,'little')
         self.assertEqual(decode_telemetry('obstacle',obstacle),dict(nearest_mm=500,width_mm=80,left_mm=200,right_mm=300))
+        uncertain=(140|(2047<<12)|(4094<<23)|(4095<<35)).to_bytes(6,'little')
+        self.assertEqual(decode_telemetry('obstacle',uncertain),
+                         dict(nearest_mm=140,width_mm=None,left_mm='Open',right_mm=None))
     def test_each_topic_has_independent_freshness(self):
         self.send('motion',motion_packet())
         self.now+=3

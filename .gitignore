@@ -15,6 +15,7 @@ build_make/.build_profile
 # Real WiFi credentials -- never commit these. Copy config/wifi_secrets.example.h
 # to config/wifi_secrets.h and fill in your own network's SSID/password.
 config/wifi_secrets.h
+config/s5_servo_calibration.h
 
 # Videos are shared as unlisted YouTube links (videos/README.md), never committed
 *.mp4

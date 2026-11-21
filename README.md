@@ -4,7 +4,9 @@
 
 This revision retains the team's motor wiring, queue, five-second startup delay, and normal-speed and encoder-position control. Forward crawl targets up to 16 RPM use an 80 ms encoder window and finer PWM steps. With equal crawl targets, the controller trims the faster wheel and helps the slower wheel. Build with `make -C build_make -j8 SMP=1 CONSOLE=usb_cdc NET=lwip MQTT=1` and use the binary v2 [dashboard](dashboard/README.md) to send START. Keep your local `config/wifi_secrets.h` and use the same broker and topic root on both sides.
 
-The line follower uses GP26 and GP28 for steering at a 10 RPM cruise target, about 35 mm/s on 67 mm wheels. Straight-line corrections use a 2 RPM difference and taper as the edge reading returns. After a sustained bend, a 360 ms settling period gives the wheels time to match speed and requires a longer edge signal to enter another bend. The outside wheel is capped at 12 RPM and the inside wheel can pause during a tight bend. Confirmed bends keep their direction through brief gaps in edge detection. If neither edge returns within 1.6 seconds after losing a sustained bend, the controller stops. GP27 reports decoded A–D barcodes over the original telemetry protocol. The recovery profile follows the line without automatic barcode turns or obstacle bypass.
+The line follower uses GP26 and GP28 for steering at a 10 RPM cruise target, about 35 mm/s on 67 mm wheels. Straight-line corrections use a 2 RPM difference and taper as the edge reading returns. After a sustained bend, a 360 ms settling period gives the wheels time to match speed and requires a longer edge signal to enter another bend. The outside wheel is capped at 12 RPM and the inside wheel can pause during a tight bend. Confirmed bends keep their direction through brief gaps in edge detection. If neither edge returns within 1.6 seconds after losing a sustained bend, the controller stops. GP27 reports decoded A–D barcodes over the original telemetry protocol.
+
+Subsystem 5 monitors forward range on GP16/GP17. A confirmed return within 220 mm stops line following. After motor feedback confirms both wheels have stopped, the GP12 servo sweeps five coarse bearings and refines the obstacle edges in 5° steps. The controller profiles the obstacle, chooses a detour, and checks a new forward range before driving each leg. It hands control back to the original line follower after a confirmed crossing and realignment. See [Subsystem 5 bench and track checks](testing/subsystem5/TEST_LOG.md) for servo direction and geometry calibration.
 
 To isolate the drivetrain, raise and secure both drive wheels before flashing the motion autotest build. It runs the team's queue checks, waits for the original startup delay, and then runs the original movement sequence without the dashboard or line sensors. Reset repeats the sequence.
 
@@ -12,7 +14,7 @@ To isolate the drivetrain, raise and secure both drive wheels before flashing th
 make -C build_make -j8 SMP=1 WIFI=none NET=none MQTT=0 MOTION_AUTOTEST=1
 ```
 
-The corresponding `mtk3pico_smp1_usb_cdc_motion_autotest.uf2` is distinct from the normal image. A regular `WIFI=none NET=none MQTT=0` build uses the team's offline auto-start behavior and begins line following after startup when ADC samples are available.
+The corresponding `mtk3pico_smp1_usb_cdc_motion_autotest.uf2` is distinct from the normal image. A regular `WIFI=none NET=none MQTT=0` build uses the team's offline auto-start behavior. After startup it begins navigating once the line sensors and forward sonar allow it.
 
 ---
 

@@ -78,6 +78,14 @@ def decode_telemetry(kind, payload):
         return dict(height_mm=height, phase=phase)
     fields = dict(nearest_mm=bits(0, 12), width_mm=bits(12, 11),
                   left_mm=bits(23, 12), right_mm=bits(35, 12))
-    if word >> 47 or fields['width_mm'] > 2000 or max(fields['nearest_mm'], fields['left_mm'], fields['right_mm']) > 4000:
+    if (word >> 47 or fields['nearest_mm'] > 4000 or
+            (fields['width_mm'] > 2000 and fields['width_mm'] != 2047)):
         raise ValueError('Invalid obstacle payload')
+    if fields['width_mm'] == 2047:
+        fields['width_mm'] = None
+    for side in ('left_mm', 'right_mm'):
+        if fields[side] in (4094, 4095):
+            fields[side] = 'Open' if fields[side] == 4094 else None
+        elif fields[side] > 4000:
+            raise ValueError('Invalid obstacle payload')
     return fields

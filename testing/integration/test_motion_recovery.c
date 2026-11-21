@@ -166,21 +166,21 @@ static void check_start_stop(void)
     VC_MODEL model = {0};
     VC_OUTPUT out;
     VC_INPUT input = {
-        .start = true, .ready = true, .link_required = true, .line_valid = true,
+        .start = true, .ready = true, .line_valid = true,
         .left_rpm = 30, .right_rpm = 30
     };
     vc_core_step(&model, &input, &out);
-    assert(!model.running && out.stop);
+    assert(!vc_core_running(&model) && out.stop);
     input.link_ok = true;
     vc_core_step(&model, &input, &out);
-    assert(model.running && !out.stop && out.left_rpm == 30 && out.right_rpm == 30);
+    assert(vc_core_running(&model) && !out.stop && out.left_rpm == 30 && out.right_rpm == 30);
     input.start = false;
     input.link_ok = false;
     vc_core_step(&model, &input, &out);
-    assert(model.running && !out.stop);
+    assert(vc_core_running(&model) && !out.stop);
     input.line_age_ms = VC_LINE_MAX_AGE_MS + 1u;
     vc_core_step(&model, &input, &out);
-    assert(!model.running && out.stop && model.reason == VC_REASON_STALE_LINE);
+    assert(!vc_core_running(&model) && out.stop && model.reason == VC_REASON_STALE_LINE);
     input.line_age_ms = 0;
     input.link_ok = true;
     vc_core_step(&model, &input, &out);
@@ -188,7 +188,7 @@ static void check_start_stop(void)
     input.start = true;
     input.stop = true;
     vc_core_step(&model, &input, &out);
-    assert(!model.running && out.stop && model.reason == VC_REASON_STOP);
+    assert(!vc_core_running(&model) && out.stop && model.reason == VC_REASON_STOP);
     input.start = false;
     input.stop = false;
     vc_core_step(&model, &input, &out);

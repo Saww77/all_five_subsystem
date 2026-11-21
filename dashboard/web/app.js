@@ -184,7 +184,8 @@ function drawTelemetry(data) {
   text("terrain-height", terrain?.height_mm);
   text("terrain-phase", terrain?.phase);
   for (const [id, key] of [["nearest", "nearest_mm"], ["width", "width_mm"], ["left", "left_mm"], ["right", "right_mm"]]) {
-    text("obstacle-" + id, obstacle ? obstacle[key] + " mm" : null);
+    const value = obstacle?.[key];
+    text("obstacle-" + id, typeof value === "number" ? value + " mm" : value);
   }
   const history = data?.motion_history ?? [];
   const maximum = Math.max(30, ...history.flatMap(p => [p.left_rpm, p.right_rpm]));

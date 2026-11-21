@@ -2,6 +2,10 @@
 #include "motion_config.h"
 #include "motion_crawl.h"
 #include "motion_hw.h"
+#include "motion_transport.h"
+
+#define WHEEL_CIRCUMFERENCE_UM ((uint32_t)((uint64_t)WHEEL_DIAMETER_MM*3141593u/1000u))
+#define S5_MANEUVER_RPM 24u
 
 enum { IDLE, VELOCITY, DISTANCE, TURN };
 enum { FAULT_COUNTS=1, FAULT_TIMING=2, FAULT_STALL=4, FAULT_TIMEOUT=8 };
@@ -173,7 +177,7 @@ bool s2_core_set_wheel_rpm(unsigned left,unsigned right)
 static unsigned distance_counts(unsigned mm,unsigned w)
 {
     /* circumference in micrometres, pi approximated as 3.141593 */
-    uint32_t circumference_um=(uint32_t)((uint64_t)WHEEL_DIAMETER_MM*3141593u/1000u);
+    uint32_t circumference_um=WHEEL_CIRCUMFERENCE_UM;
     return (unsigned)(((uint64_t)mm*cpr(w)*100u + circumference_um/2)/circumference_um);
 }
 static bool move_mm(unsigned mm,bool reverse)
@@ -184,20 +188,59 @@ static bool move_mm(unsigned mm,bool reverse)
 }
 bool s2_core_move_forward_mm(unsigned mm) { return move_mm(mm,false); }
 bool s2_core_move_backward_mm(unsigned mm) { return move_mm(mm,true); }
+static unsigned turn_counts(unsigned steps,unsigned wheel)
+{
+    uint64_t numerator=(uint64_t)EFFECTIVE_TRACK_MM*steps*45u*cpr(wheel);
+    uint32_t denominator=360u*WHEEL_DIAMETER_MM*10u;
+    return (unsigned)((numerator+denominator/2)/denominator);
+}
 static bool turn(unsigned steps,bool right)
 {
     if(steps<1 || steps>8) return false;
-    unsigned target[2];
-    for(unsigned i=0;i<2;i++) {
-        uint64_t numerator=(uint64_t)EFFECTIVE_TRACK_MM*steps*45u*cpr(i);
-        uint32_t denominator=360u*WHEEL_DIAMETER_MM*10u;
-        target[i]=(unsigned)((numerator+denominator/2)/denominator);
-    }
-    if(!start(TURN,!right,right,target[0],target[1])) return false;
-    return true;
+    return start(TURN,!right,right,turn_counts(steps,0),turn_counts(steps,1));
 }
 bool s2_core_turn_left(unsigned steps) { return turn(steps,false); }
 bool s2_core_turn_right(unsigned steps) { return turn(steps,true); }
+
+bool s2_core_maneuver(unsigned arg)
+{
+    bool accepted;
+    unsigned level=state.level;
+    if(!level)state.level=1;
+    if ((arg & ~1u)==S2_MANEUVER_TURN) {
+        accepted=turn(2,(arg&1u)!=0);
+    } else {
+        bool reverse=arg>S2_MANEUVER_REVERSE_BASE;
+        unsigned mm=reverse?arg-S2_MANEUVER_REVERSE_BASE:arg;
+        accepted=mm && mm<=MAX_DISTANCE_MM && move_mm(mm,reverse);
+    }
+    state.level=level;
+    if(accepted)state.left_rpm=state.right_rpm=S5_MANEUVER_RPM;
+    return accepted;
+}
+
+bool s2_core_distance_reached(unsigned mm,const S2_STATUS *status)
+{
+    return s2_get_bits(status,41,13)>=distance_counts(mm,0) &&
+           s2_get_bits(status,54,13)>=distance_counts(mm,1);
+}
+
+unsigned s2_core_distance_travelled_mm(const S2_STATUS *status)
+{
+    unsigned left=(unsigned)((uint64_t)s2_get_bits(status,41,13)*WHEEL_CIRCUMFERENCE_UM/(cpr(0)*100u));
+    unsigned right=(unsigned)((uint64_t)s2_get_bits(status,54,13)*WHEEL_CIRCUMFERENCE_UM/(cpr(1)*100u));
+    return left<right?left:right;
+}
+
+bool s2_core_maneuver_finished(unsigned arg,const S2_STATUS *status)
+{
+    if(s2_get_bits(status,0,2)!=IDLE || s2_get_bits(status,5,4))return false;
+    if((arg&~1u)==S2_MANEUVER_TURN)
+        return s2_get_bits(status,41,13)>=turn_counts(2,0) &&
+               s2_get_bits(status,54,13)>=turn_counts(2,1);
+    unsigned mm=arg>S2_MANEUVER_REVERSE_BASE?arg-S2_MANEUVER_REVERSE_BASE:arg;
+    return mm && mm<=MAX_DISTANCE_MM && s2_core_distance_reached(mm,status);
+}
 bool s2_core_busy(void) { return state.mode!=IDLE; }
 unsigned s2_core_faults(void) { return state.faults; }
 bool s2_core_clear_faults(void)
