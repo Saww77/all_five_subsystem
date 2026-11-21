@@ -4,7 +4,7 @@
 
 This revision uses the team's original Subsystem 2, including its motor driver, PID, queue, five-second startup delay, and encoder pin assignments. Build with `make -C build_make -j8 SMP=1 CONSOLE=usb_cdc NET=lwip MQTT=1` and use the binary v2 [dashboard](dashboard/README.md) to send START. Keep your local `config/wifi_secrets.h` and use the same broker and topic root on both sides.
 
-The line follower continues to use GP26 and GP28 for steering. It starts at the team's 30 RPM target for a quarter second and then targets 22 RPM. Steering changes in 2 RPM steps and returns toward straight when both edge readings drop. GP27 reports decoded A–D barcodes over the original telemetry protocol. The recovery profile follows the line without automatic barcode turns or obstacle bypass.
+The line follower uses GP26 and GP28 for steering at a 10 RPM cruise target, about 35 mm/s on 67 mm wheels. The outside wheel is capped at 12 RPM and the inside wheel can pause during a tight bend. Confirmed bends keep their direction through brief gaps in edge detection. If neither edge returns within 1.6 seconds after losing a sustained bend, the controller stops. GP27 reports decoded A–D barcodes over the original telemetry protocol. The recovery profile follows the line without automatic barcode turns or obstacle bypass.
 
 To isolate the drivetrain, raise and secure both drive wheels before flashing the motion autotest build. It runs the team's queue checks, waits for the original startup delay, and then runs the original movement sequence without the dashboard or line sensors. Reset repeats the sequence.
 

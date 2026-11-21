@@ -11,6 +11,8 @@ cc -std=c11 -Wall -Wextra -Werror testing/integration/test_motion_recovery.c \
 
 On 21 November 2026 the recovery regression and 23 dashboard tests passed. The Pico W MQTT, offline and isolated motion autotest images linked with the original Subsystem 2 source. A hardware run is recorded separately when performed.
 
+The slower line-following regression adds straight-line noise, a one-sample reflectance spike, tight left and right bends, brief loss and recentering, a broad marking, and a stop after persistent loss during a bend. The motion stack and its pin assignments are unchanged. This test feeds synthetic IR readings into the production steering code.
+
 Tests that two or more subsystems work together. There is one test (or more) for every interface listed in TEAM.md section 5. Both owners agree on the test and sign off the result.
 
 See `testing/README.md` for how to run tests and record results.

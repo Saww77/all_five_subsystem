@@ -9,7 +9,7 @@
 
 
 /* Calibration: raw ADC on white paper and on the black line (L, C, R).
-   Measure on your track; the live check below prints the raw values. */
+   Measure on your track before tuning the line thresholds. */
 LOCAL const INT white_raw[3] = { 130, 130, 130 };
 LOCAL const INT black_raw[3] = { 3200, 3200, 3200 };
 
@@ -39,8 +39,6 @@ EXPORT ER line_sense(INT *left, INT *center, INT *right)
 }
 
 LOCAL ID owner_id;
-#define S3_START_RPM 30
-#define S3_START_MS 250u
 
 LOCAL void tick_release(void *exinf)
 {
@@ -59,7 +57,6 @@ EXPORT void line_follow_task(INT stacd, void *exinf)
     LF_STATE steering = {0};
     SYSTIM time;
     UW previous_tick = 0;
-    UW follow_started = 0;
     unsigned last_barcode = 0;
     BOOL was_following = FALSE;
     T_CCYC cyc = {0};
@@ -93,13 +90,12 @@ EXPORT void line_follow_task(INT stacd, void *exinf)
         if (!following || !was_following) {
             last_barcode = 0;
             steering = (LF_STATE){0};
-            follow_started = time.lo;
         }
         if (!following || !was_following || center < 0 ||
             time.lo - previous_tick > 2u * LINE_PERIOD_MS) {
             barcode_reset();
         }
-        if (following && center >= 0 && time.lo - follow_started >= S3_START_MS) {
+        if (following && center >= 0) {
             barcode_feed(center);
             char letter = barcode_take();
             if (letter != 0) { last_barcode = barcode_id(letter); }
@@ -109,12 +105,6 @@ EXPORT void line_follow_task(INT stacd, void *exinf)
 
         LF_CMD command;
         line_decide(left, center, right, &steering, &command);
-        /* Use the original target briefly to get through static friction,
-         * then settle to the slower line-following target. */
-        if (time.lo - follow_started < S3_START_MS) {
-            command.left += S3_START_RPM - S3_CRUISE_RPM;
-            command.right += S3_START_RPM - S3_CRUISE_RPM;
-        }
         vehicle_submit_line(left, center < 0 ? 0 : center, right,
                             command.left, command.right, command.stop, last_barcode);
     }
