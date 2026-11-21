@@ -5,6 +5,7 @@
 #define MAX_LATERAL_OFFSET_MM 400u
 #define FIRST_SIDE_CHECK_MARGIN_MM 35u
 #define NESTED_PASS_MARGIN_MM 130u
+#define NESTED_PASS_LIMIT_MM 600u
 #define RETRY_STEP_MM 60u
 #define MIN_LEFT_STEP_MM 20u
 #define MOTION_SETTLE_MS 260u
@@ -25,8 +26,10 @@
 #define EDGE_OFFSET_DEADBAND_MM 20u
 
 _Static_assert(S2_ARC_ANGLE_DEG == 60u, "Return offset projections use a 60 degree arc");
-_Static_assert(S5_FOLLOW_CLEAR_MM + NESTED_PASS_MARGIN_MM + S5_REAR_CLEARANCE_MM <= S5_MAX_PASS_MM,
+_Static_assert(S5_FOLLOW_CLEAR_MM + FIRST_SIDE_CHECK_MARGIN_MM + S5_REAR_CLEARANCE_MM <= S5_MAX_PASS_MM,
                "The maximum profiled distance must fit the bypass budget");
+_Static_assert(S5_CLEAR_MM + NESTED_PASS_MARGIN_MM <= NESTED_PASS_LIMIT_MM,
+               "The maximum nested pass must fit the nested bypass budget");
 _Static_assert(S5_FOLLOW_CLEAR_MM + FIRST_SIDE_CHECK_MARGIN_MM < 512u, "The initial pass must fit the plan");
 _Static_assert(S5_MAX_PASS_MM < 1024u, "Total pass distance must fit the 10-bit fields");
 _Static_assert(S5_CHASSIS_WIDTH_MM >= EFFECTIVE_TRACK_MM, "Include the outer wheel edges in chassis width");
@@ -304,7 +307,7 @@ static S5_AVOID_OUTPUT finish_forward_leg(S5_AVOID *state, const S5_AVOID_INPUT 
             unsigned far_side = leg->line_goal_mm + margin;
             if (position + margin > leg->line_goal_mm && position < far_side) {
                 unsigned extra = far_side - position;
-                if (passed + extra > S5_MAX_PASS_MM) return fail(state, S5_FAIL_LINE, in->now);
+                if (passed + extra > NESTED_PASS_LIMIT_MM) return fail(state, S5_FAIL_LINE, in->now);
                 state->next_pass_mm = extra;
                 return go(state, S5_PASS, in->now);
             }

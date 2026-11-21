@@ -8,8 +8,9 @@
 #define S5_RANGE_MAX_AGE_MS 300u
 #define S5_SLOW_RANGE_MM 500u
 #define S5_MANEUVER_STOP_MM 150u
-#define S5_MAX_PASS_MM 600u
-#define S5_REAR_CLEARANCE_MM 100u
+/* Budget extra straight travel for the nose-mounted, forward-biased side scan. */
+#define S5_REAR_CLEARANCE_MM 220u
+#define S5_MAX_PASS_MM (500u + S5_REAR_CLEARANCE_MM)
 #define S5_APPROACH_RPM 20u
 #define S5_CLEARANCE_BEARING_DEG 45u
 #define S5_LATERAL_TURN_DEG 90u

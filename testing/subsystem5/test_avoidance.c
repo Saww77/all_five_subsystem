@@ -96,6 +96,10 @@ static void clear_rear_and_recheck(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out
     return_check(model, in, out, S5_OPEN_RANGE);
     assert(model->avoidance.phase == S5_PASS && model->avoidance.rear_clearance_pending);
     start_move(model, in, out, S5_ADVANCE, S5_REAR_CLEARANCE_MM);
+    in->avoidance.travel_mm = 100; /* The old buffer ended while the chassis was beside the box. */
+    step(model, in, out, 1000);
+    assert(!out->stop && out->maneuver.action == S5_WAIT && model->avoidance.phase == S5_PASS);
+    in->avoidance.travel_mm = 0;
     end_move(model, in, out);
     assert(model->avoidance.phase == S5_VERIFY_RETURN &&
            model->avoidance.passed_mm == passed + S5_REAR_CLEARANCE_MM);
@@ -163,7 +167,8 @@ static void test_rejoin(bool left, bool retry, bool open_side)
         start_move(&model, &in, &out, outward, 0);
         end_move(&model, &in, &out);
         in.avoidance.range_mm = 1000;
-        start_move(&model, &in, &out, S5_ADVANCE, 60);
+        unsigned remaining = S5_MAX_PASS_MM - model.avoidance.passed_mm - S5_REAR_CLEARANCE_MM;
+        start_move(&model, &in, &out, S5_ADVANCE, remaining < 60 ? remaining : 60);
         end_move(&model, &in, &out);
         clear_rear_and_recheck(&model, &in, &out);
         in.avoidance.range_mm = 200;
@@ -849,10 +854,12 @@ static void test_rounded_bypass(bool left)
     in.avoidance.return_clear_mm = S5_OPEN_RANGE;
     step(&model, &in, &out, 20);
     assert(model.avoidance.phase == S5_VERIFY_RETURN && out.maneuver.action == S5_WAIT);
-    return_check(&model, &in, &out, 110);
-    assert(model.avoidance.phase == S5_PASS);
-    start_move(&model, &in, &out, S5_ADVANCE, 60);
-    end_move(&model, &in, &out);
+    for (unsigned i = 0; i < 2; ++i) {
+        return_check(&model, &in, &out, 110);
+        assert(model.avoidance.phase == S5_PASS);
+        start_move(&model, &in, &out, S5_ADVANCE, 60);
+        end_move(&model, &in, &out);
+    }
     clear_rear_and_recheck(&model, &in, &out);
     in.avoidance.range_valid = false;
     step(&model, &in, &out, 260);
