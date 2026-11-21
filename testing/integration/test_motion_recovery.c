@@ -42,6 +42,21 @@ static void check_steering_reversal(void)
     assert(0 && "persistent error must still steer after the neutral interval");
 }
 
+static void check_early_release(void)
+{
+    LF_STATE state = {0};
+    LF_CMD out;
+
+    for (unsigned i = 0; i < 20u; ++i) {
+        line_decide(130, 0, 425, &state, &out);
+    }
+    assert(state.curve_side == 0 && out.left - out.right == S3_CORRECTION_STEP_RPM);
+    for (unsigned i = 0; i < 3u; ++i) {
+        line_decide(130, 0, 225, &state, &out);
+    }
+    assert(out.left == S3_CRUISE_RPM && out.right == S3_CRUISE_RPM);
+}
+
 static void check_curve(int side)
 {
     LF_STATE state = {0};
@@ -110,6 +125,42 @@ static void check_line_drop(void)
     assert(out.left == out.right && !out.stop);
 }
 
+static void check_curve_exit(int side, bool next_bend)
+{
+    LF_STATE state = {0};
+    LF_CMD out;
+    const int left = side < 0 ? 950 : 80;
+    const int right = side > 0 ? 950 : 80;
+
+    for (unsigned i = 0; i < 35u; ++i) {
+        line_decide(left, 0, right, &state, &out);
+    }
+    for (unsigned i = 0; i < 2u; ++i) {
+        line_decide(430, 0, 430, &state, &out);
+    }
+    assert(state.curve_side == 0 && state.settle_samples == S3_CURVE_EXIT_SAMPLES);
+
+    /* A brief opposite edge after turning gets only a small heading trim. */
+    for (unsigned i = 0; i < 18u; ++i) {
+        line_decide(right, 0, left, &state, &out);
+        assert(state.curve_side == 0 && !out.stop);
+        assert(side * (out.left - out.right) >= -S3_CORRECTION_STEP_RPM);
+    }
+
+    if (next_bend) {
+        for (unsigned i = 0; i < 12u; ++i) {
+            line_decide(right, 0, left, &state, &out);
+        }
+        assert(state.curve_side == -side && !out.stop);
+    } else {
+        for (unsigned i = 0; i < 40u; ++i) {
+            line_decide(250, 0, 250, &state, &out);
+        }
+        assert(state.curve_side == 0 && !out.stop);
+        assert(out.left == S3_CRUISE_RPM && out.right == S3_CRUISE_RPM);
+    }
+}
+
 static void check_start_stop(void)
 {
     VC_MODEL model = {0};
@@ -152,10 +203,15 @@ int main(void)
 {
     check_steering();
     check_steering_reversal();
+    check_early_release();
     check_curve(-1);
     check_curve(1);
     check_line_drop();
+    check_curve_exit(-1, false);
+    check_curve_exit(1, false);
+    check_curve_exit(-1, true);
+    check_curve_exit(1, true);
     check_start_stop();
-    puts("PASS slow steering, both curves, line recovery and timeout, MQTT start and STOP priority");
+    puts("PASS straight trim, curve entry and exit, recovery timeout, MQTT start and STOP priority");
     return 0;
 }

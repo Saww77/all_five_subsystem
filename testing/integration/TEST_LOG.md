@@ -15,6 +15,8 @@ The slower line-following regression adds straight-line noise, a one-sample refl
 
 The wheel matching regression adds a neutral interval before opposite steering, and tests the production motor core against phase-shifted encoder pulses, unequal wheel drag, a stopped inside wheel, bounded turns, and a stalled motor.
 
+The steering regression also checks that a short opposite edge after a sustained bend produces a smaller correction and that a persistent opposite edge can still start a second bend.
+
 ```sh
 cc -std=c11 -Wall -Wextra -Werror testing/integration/test_motion_crawl.c \
   app_program/subsystem2/motion_crawl.c -o /tmp/test_motion_crawl
