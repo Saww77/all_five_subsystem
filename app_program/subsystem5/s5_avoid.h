@@ -17,12 +17,12 @@
 #ifndef S5_CHASSIS_WIDTH_MM
 #define S5_CHASSIS_WIDTH_MM 160u /* Verify the widest point, including tyres. */
 #endif
-#define S5_SIDE_GAP_MM 15u
+#define S5_SIDE_GAP_MM 40u
 #define S5_SIDE_ALLOWANCE_MM ((S5_CHASSIS_WIDTH_MM + 1u) / 2u + S5_SIDE_GAP_MM)
 #ifndef S5_IR_TO_AXLE_MM
 #define S5_IR_TO_AXLE_MM 60u
 #endif
-#define S5_MIN_SIDE_SHIFT_MM (S5_IR_TO_AXLE_MM + S5_SIDE_GAP_MM)
+#define S5_MIN_SIDE_SHIFT_MM (S5_IR_TO_AXLE_MM + 15u)
 #define S5_UNCERTAIN_EDGE_MM 25u
 #define S5_OUTWARD_STEP_MM 25u
 #define S5_OUTWARD_LIMIT_MM 50u
@@ -49,7 +49,10 @@ static inline unsigned s5_side_scan_index(S5_SIDE look_side, unsigned bearing)
     return look_side == S5_LEFT ? S5_CENTRE_INDEX - steps : S5_CENTRE_INDEX + steps;
 }
 
-typedef enum { S5_WAIT, S5_STOP, S5_ADVANCE, S5_PIVOT_LEFT, S5_PIVOT_RIGHT, S5_REVERSE, S5_RESCAN } S5_ACTION;
+typedef enum {
+    S5_WAIT, S5_STOP, S5_ADVANCE, S5_PIVOT_LEFT, S5_PIVOT_RIGHT, S5_REVERSE, S5_RESCAN,
+    S5_ARC_LEFT, S5_ARC_RIGHT
+} S5_ACTION;
 typedef enum { S5_MOTION_NONE, S5_MOTION_QUEUED, S5_MOTION_PENDING, S5_MOTION_DONE, S5_MOTION_FAILED } S5_MOTION;
 typedef enum {
     S5_FAIL_NONE, S5_FAIL_SCAN_TIMEOUT, S5_FAIL_TARGET, S5_FAIL_WIDTH, S5_FAIL_ROOM,
@@ -85,10 +88,10 @@ typedef struct {
     unsigned offset_mm:10, next_pass_mm:10, passed_mm:10, depth:2;
     unsigned leg_progress_mm:10, issued_mm:10, waiting_echo:1, short_approach:1;
     unsigned blocked_range_mm:12;
-    unsigned widening:1, additional_outward_mm:6, rear_clearance_pending:1;
+    unsigned widening:1, additional_outward_mm:6, rear_clearance_pending:1, rounded_return:1;
 } S5_AVOID;
 typedef struct {
-    uint16_t action : 3;
+    uint16_t action : 4;
     uint16_t distance_mm : 10;
 } S5_AVOID_OUTPUT;
 
@@ -99,6 +102,7 @@ typedef struct {
 
 S5_BYPASS s5_plan_bypass(const S5_PROFILE *profile);
 unsigned s5_reentry_detection_mm(unsigned offset_mm, unsigned sensor_to_axle_mm);
+unsigned s5_return_tape_distance_mm(const S5_AVOID *state);
 unsigned s5_return_clearance_mm(unsigned inner_range, unsigned outer_range);
 void s5_avoid_begin(S5_AVOID *state, uint32_t now);
 void s5_avoid_abort(S5_AVOID *state, S5_FAILURE reason, uint32_t now);

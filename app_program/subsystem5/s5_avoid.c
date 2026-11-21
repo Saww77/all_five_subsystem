@@ -15,8 +15,15 @@
 #define LONG_MOVE_TIMEOUT_MS 15000u
 #define RETURN_CHECK_TIMEOUT_MS 4500u
 #define RETURN_MARGIN_MM 70u
+#define RETURN_STOP_MM S5_TURN_CLEARANCE_MM
+#define RETURN_RESERVE_MM (RETURN_STOP_MM + 10u)
+#define ARC_FORWARD_MM ((S2_ARC_RADIUS_MM * 866u + 999u) / 1000u)
+#define ARC_SIDEWAYS_MM (S2_ARC_RADIUS_MM / 2u)
+#define ARC_ENTRY_MM (ARC_FORWARD_MM + S5_DEPARTURE_CLEARANCE_MM)
+#define ROUND_RETURN_EXTRA_ROOM_MM 270u
 #define EDGE_OFFSET_DEADBAND_MM 20u
 
+_Static_assert(S2_ARC_ANGLE_DEG == 60u, "Return offset projections use a 60 degree arc");
 _Static_assert(S5_FOLLOW_CLEAR_MM + FOLLOW_AHEAD_MARGIN_MM + S5_REAR_CLEARANCE_MM <= S5_MAX_PASS_MM,
                "The maximum profiled distance must fit the bypass budget");
 _Static_assert(S5_FOLLOW_CLEAR_MM + FOLLOW_AHEAD_MARGIN_MM < 512u, "The initial pass must fit the plan");
@@ -68,6 +75,13 @@ unsigned s5_reentry_detection_mm(unsigned offset_mm, unsigned sensor_to_axle_mm)
 {
     unsigned margin = S5_SEARCH_MARGIN_MM + sensor_to_axle_mm;
     return offset_mm > margin ? offset_mm - margin : 0u;
+}
+
+unsigned s5_return_tape_distance_mm(const S5_AVOID *state)
+{
+    if (!state->rounded_return) return state->offset_mm;
+    unsigned sideways = state->offset_mm - ARC_SIDEWAYS_MM;
+    return (sideways * 1000u + 865u) / 866u;
 }
 
 unsigned s5_return_clearance_mm(unsigned inner_range, unsigned outer_range)
@@ -158,7 +172,7 @@ static unsigned leg_distance(const S5_AVOID *state, const S5_AVOID_INPUT *in)
     switch (state->phase) {
     case S5_SHIFT_OUT: return state->widening ? S5_OUTWARD_STEP_MM : state->offset_mm;
     case S5_PASS: return state->next_pass_mm;
-    case S5_FIND_LINE: return state->offset_mm + (state->depth ? 0u : S5_SEARCH_MARGIN_MM);
+    case S5_FIND_LINE: return s5_return_tape_distance_mm(state) + (state->depth ? 0u : S5_SEARCH_MARGIN_MM);
     case S5_CENTER_LINE: return in->sensor_to_axle_mm;
     default: return 0;
     }
@@ -191,6 +205,7 @@ static S5_AVOID_OUTPUT avoid_on_leg(S5_AVOID *state, const S5_AVOID_INPUT *in)
     state->offset_mm = state->next_pass_mm = state->passed_mm = 0;
     state->widening = false;
     state->rear_clearance_pending = false;
+    state->rounded_return = false;
     state->additional_outward_mm = 0;
     go(state, S5_PROFILE_PATH, in->now);
     return (S5_AVOID_OUTPUT){.action = S5_STOP};
@@ -323,7 +338,11 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         if (in->return_clear_mm == S5_UNKNOWN_RANGE) return fail(state, S5_FAIL_ECHO, in->now);
         if (in->return_clear_mm < required)
             return search_farther_alongside(state, S5_PASS, in->now);
-        if (state->rear_clearance_pending) return go(state, S5_TURN_IN, in->now);
+        if (state->rear_clearance_pending) {
+            state->rounded_return = state->offset_mm >= ARC_SIDEWAYS_MM + in->sensor_to_axle_mm + S5_SEARCH_MARGIN_MM &&
+                                    in->return_clear_mm >= state->offset_mm + ROUND_RETURN_EXTRA_ROOM_MM;
+            return go(state, S5_TURN_IN, in->now);
+        }
         if (state->passed_mm + S5_REAR_CLEARANCE_MM > S5_MAX_PASS_MM)
             return fail(state, S5_FAIL_CLOSE, in->now);
         state->rear_clearance_pending = true;
@@ -351,6 +370,8 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
     }
     bool forward = phase == S5_SHIFT_OUT || phase == S5_PASS ||
                    phase == S5_FIND_LINE || phase == S5_CENTER_LINE;
+    bool returning = !state->depth && returning_to_line(phase);
+    bool arcing = state->rounded_return && (phase == S5_TURN_IN || phase == S5_ALIGN_LINE);
     bool moving = in->motion == S5_MOTION_QUEUED || in->motion == S5_MOTION_PENDING;
     bool probing = phase == S5_TURN_OUT && state->probe_left;
     if (state->waiting_echo) {
@@ -449,7 +470,10 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
             !at_or_after(in->range_at, state->phase_at + MOTION_SETTLE_MS)) return wait;
         if (state->depth) return resume_leg(state, in, true);
         if (in->line_junction) return fail(state, S5_FAIL_LINE, in->now);
-        if (!in->line_centered || !at_or_after(in->line_at, state->phase_at + MOTION_SETTLE_MS))
+        /* A confirmed crossing and completed turn can leave tape under one
+           outer sensor. The normal follower can trim that small error. */
+        if ((!in->line_centered && !in->line_hit) ||
+            !at_or_after(in->line_at, state->phase_at + MOTION_SETTLE_MS))
             return wait;
         if (in->range_mm <= clear_mm) {
             s5_avoid_begin(state, in->now);
@@ -457,22 +481,28 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         }
         return go(state, S5_COMPLETE, in->now);
     }
-    unsigned stop_distance = state->short_approach ? S5_MANEUVER_STOP_MM : S5_SCAN_STOP_MM;
+    unsigned stop_distance = returning ? RETURN_STOP_MM :
+                             state->short_approach ? S5_MANEUVER_STOP_MM : S5_SCAN_STOP_MM;
+    if (moving && arcing && (!range_fresh || in->range_mm <= RETURN_STOP_MM))
+        return fail(state, range_fresh ? S5_FAIL_CLOSE : S5_FAIL_ECHO, in->now);
     if (moving && forward && range_fresh && in->range_mm <= stop_distance)
-        return state->widening ? fail(state, S5_FAIL_CLOSE, in->now) : avoid_on_leg(state, in);
+        return (state->widening || state->rounded_return) ? fail(state, S5_FAIL_CLOSE, in->now) :
+                                                           avoid_on_leg(state, in);
     if (moving && (range_fresh ? in->range_mm < S5_TURN_CLEARANCE_MM : !(probing || in->echo_quiet)))
         return fail(state, range_fresh ? S5_FAIL_CLOSE : S5_FAIL_ECHO, in->now);
 
-    if (!state->depth && phase == S5_FIND_LINE &&
-        (in->motion == S5_MOTION_PENDING || in->motion == S5_MOTION_DONE)) {
+    bool settled_search = in->motion == S5_MOTION_NONE && in->stopped && elapsed >= MOTION_SETTLE_MS;
+    if (returning && phase == S5_FIND_LINE &&
+        (in->motion == S5_MOTION_PENDING || in->motion == S5_MOTION_DONE || settled_search)) {
         if (in->near_original_line && at_or_after(in->line_at, state->phase_at) && in->line_at != state->last_line_at) {
             state->last_line_at = in->line_at;
             state->line_samples = in->line_hit ? state->line_samples + 1u : 0u;
         }
         if (state->line_samples >= 2) {
-            go(state, S5_CENTER_LINE, in->now);
+            go(state, state->rounded_return ? S5_ALIGN_LINE : S5_CENTER_LINE, in->now);
             return (S5_AVOID_OUTPUT){.action = S5_STOP};
         }
+        if (state->line_samples == 1 && (settled_search || in->motion == S5_MOTION_DONE)) return wait;
     }
 
     if (moving) return wait;
@@ -510,6 +540,12 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         bool outward = phase == S5_TURN_OUT || phase == S5_ALIGN_RETRY || phase == S5_ALIGN_LINE;
         if (phase == S5_ALIGN_LINE && state->depth && passed_parent_line(state)) outward = false;
         bool left = outward ? state->side == S5_LEFT : state->side == S5_RIGHT;
+        if (arcing) {
+            if (range_fresh && in->range_mm >= ARC_ENTRY_MM)
+                return (S5_AVOID_OUTPUT){.action = left ? S5_ARC_LEFT : S5_ARC_RIGHT};
+            if (phase == S5_ALIGN_LINE) return fail(state, S5_FAIL_CLOSE, in->now);
+            state->rounded_return = false; /* Still parallel, so a square return can fit. */
+        }
         return (S5_AVOID_OUTPUT){.action = left ? S5_PIVOT_LEFT : S5_PIVOT_RIGHT};
     }
     if (state->leg_progress_mm >= target) return finish_forward_leg(state, in);
@@ -527,15 +563,17 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         state->probe_left = false;
         return go(state, S5_TURN_OUT, in->now);
     }
-    if (phase == S5_FIND_LINE && !state->depth && !state->leg_progress_mm &&
-        (in->range_mm <= S5_SCAN_STOP_MM || in->range_mm < distance + S5_MANEUVER_STOP_MM)) {
-        /* The angled side scan can see past an obstacle beside the chassis.
-           Check again while facing the tape before driving into that corridor. */
-        if (in->range_mm < S5_TURN_CLEARANCE_MM)
+    if (returning) {
+        unsigned available = in->range_mm > RETURN_RESERVE_MM ? in->range_mm - RETURN_RESERVE_MM : 0u;
+        unsigned tape = s5_return_tape_distance_mm(state);
+        unsigned contact = tape > in->sensor_to_axle_mm ? tape - in->sensor_to_axle_mm : 0u;
+        if (phase == S5_FIND_LINE && !state->leg_progress_mm && available < contact &&
+            !state->rounded_return && in->range_mm >= S5_TURN_CLEARANCE_MM)
+            return search_farther_alongside(state, S5_ALIGN_RETRY, in->now);
+        if (!available || (phase == S5_FIND_LINE && !state->leg_progress_mm && available < contact))
             return fail(state, S5_FAIL_CLOSE, in->now);
-        return search_farther_alongside(state, S5_ALIGN_RETRY, in->now);
-    }
-    if (in->range_mm <= S5_SCAN_STOP_MM) {
+        if (distance > available) distance = available;
+    } else if (in->range_mm <= S5_SCAN_STOP_MM) {
         if (state->widening) return fail(state, S5_FAIL_CLOSE, in->now);
         unsigned buffer = S5_MANEUVER_STOP_MM + FRONT_MARGIN_MM;
         if (phase != S5_SHIFT_OUT || !state->probe_left || state->leg_progress_mm ||
@@ -549,7 +587,6 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         distance = in->range_mm - S5_SCAN_STOP_MM + 1u;
     }
     if (!state->depth && phase == S5_FIND_LINE) {
-        if (in->line_hit || in->line_junction) return fail(state, S5_FAIL_LINE, in->now);
         state->last_line_at = in->line_at;
     }
     state->issued_mm = distance;

@@ -299,7 +299,7 @@ static void test_reentry_limit(void)
     S5_AVOID model = {.phase = S5_FIND_LINE, .side = S5_LEFT,
                      .offset_mm = 185, .passed_mm = S5_MAX_PASS_MM};
     S5_AVOID_INPUT in = {.now = 300, .range_at = 300, .stopped = true,
-                         .range_valid = true, .range_mm = S5_SCAN_STOP_MM + 20};
+                         .range_valid = true, .range_mm = 220, .sensor_to_axle_mm = 60};
     S5_AVOID_OUTPUT out = s5_avoid_step(&model, &in);
     assert(out.action == S5_STOP && model.phase == S5_FAILED);
 }
@@ -310,7 +310,7 @@ static void test_width_and_side_clearance(void)
     S5_BYPASS plan = s5_plan_bypass(&scan);
     assert(plan.side == S5_LEFT);
     assert(plan.offset_mm == S5_SIDE_ALLOWANCE_MM + 50 && plan.pass_mm == S5_SCAN_STOP_MM + 130);
-    assert(s5_reentry_detection_mm(plan.offset_mm, 60) == 45);
+    assert(s5_reentry_detection_mm(plan.offset_mm, 60) == 70);
     scan.left_path_mm = scan.right_path_mm;
     assert(s5_plan_bypass(&scan).side == S5_RIGHT); /* Shorter shift leaves more space. */
     scan.left_edge_mm = -scan.right_edge_mm;
@@ -732,7 +732,7 @@ static void test_obstacle_during_line_search(void)
     VC_INPUT in = track_input();
     VC_OUTPUT out;
     start_move(&model, &in, &out, S5_ADVANCE, 215);
-    in.avoidance.range_mm = 200;
+    in.avoidance.range_mm = S5_TURN_CLEARANCE_MM;
     in.avoidance.travel_mm = 40;
     in.avoidance.stopped = false;
     step(&model, &in, &out, 100);
@@ -850,25 +850,72 @@ static void test_extra_pass_before_return(bool left)
     step(&model, &in, &out, 260);
     assert(model.avoidance.phase == S5_TURN_IN && out.maneuver.action == S5_WAIT);
     in.avoidance.range_valid = true;
-    start_move(&model, &in, &out, inward, 0);
+    assert(model.avoidance.rounded_return);
+    start_move(&model, &in, &out, left ? S5_ARC_RIGHT : S5_ARC_LEFT, 0);
     end_move(&model, &in, &out);
-    start_move(&model, &in, &out, S5_ADVANCE, offset + S5_SEARCH_MARGIN_MM);
+    unsigned approach = s5_return_tape_distance_mm(&model.avoidance);
+    assert(approach == 197);
+    start_move(&model, &in, &out, S5_ADVANCE, approach + S5_SEARCH_MARGIN_MM);
     in.avoidance.near_original_line = true;
     in.avoidance.line_hit = true;
     for (unsigned i = 0; i < 2; ++i) {
         in.avoidance.line_at = in.avoidance.now + 20;
         step(&model, &in, &out, 20);
     }
-    assert(model.avoidance.phase == S5_CENTER_LINE && out.maneuver.action == S5_STOP);
-    in.avoidance.line_hit = false;
-    start_move(&model, &in, &out, S5_ADVANCE, in.avoidance.sensor_to_axle_mm);
-    end_move(&model, &in, &out);
-    start_move(&model, &in, &out, outward, 0);
+    assert(model.avoidance.phase == S5_ALIGN_LINE && out.maneuver.action == S5_STOP);
+    start_move(&model, &in, &out, left ? S5_ARC_LEFT : S5_ARC_RIGHT, 0);
     end_move(&model, &in, &out);
     in.avoidance.line_centered = true;
     in.avoidance.line_at = in.avoidance.now + 260;
     step(&model, &in, &out, 260);
     assert(model.state == VC_FOLLOW_LINE);
+}
+
+static void test_recovery_uses_available_room_and_hands_off_on_edge(void)
+{
+    VC_MODEL model = {.state = VC_RECOVER_LINE, .avoidance = {
+        .phase = S5_FIND_LINE, .side = S5_LEFT, .offset_mm = 220,
+    }};
+    VC_INPUT in = track_input();
+    VC_OUTPUT out;
+    in.avoidance.range_mm = 300;
+    /* Room to reach the tape's IR crossing, but not to drive the entire 260 mm search. */
+    start_move(&model, &in, &out, S5_ADVANCE, 190);
+    in.avoidance.near_original_line = true;
+    in.avoidance.range_mm = 170; /* Still enough room to centre the axle. */
+    in.avoidance.line_hit = true;
+    for (unsigned i = 0; i < 2; ++i) {
+        in.avoidance.line_at = in.avoidance.now + 20;
+        step(&model, &in, &out, 20);
+    }
+    assert(out.stop && model.avoidance.phase == S5_CENTER_LINE);
+    start_move(&model, &in, &out, S5_ADVANCE, 60);
+    end_move(&model, &in, &out);
+    start_move(&model, &in, &out, S5_PIVOT_LEFT, 0);
+    end_move(&model, &in, &out);
+    in.avoidance.range_mm = 1500;
+    in.avoidance.line_at = in.avoidance.now + 260; /* Tape still under one outer IR sensor. */
+    step(&model, &in, &out, 260);
+    assert(model.state == VC_FOLLOW_LINE);
+}
+
+static void test_tape_already_under_sensor_at_start_of_search(void)
+{
+    VC_MODEL model = {.state = VC_RECOVER_LINE, .avoidance = {
+        .phase = S5_FIND_LINE, .side = S5_LEFT, .offset_mm = 90,
+    }};
+    VC_INPUT in = track_input();
+    VC_OUTPUT out;
+    in.avoidance.near_original_line = true;
+    in.avoidance.line_hit = true;
+    in.avoidance.line_at = 260;
+    step(&model, &in, &out, 260);
+    assert(out.maneuver.action == S5_WAIT && model.avoidance.line_samples == 1);
+    step(&model, &in, &out, 20);
+    assert(out.maneuver.action == S5_WAIT && model.avoidance.line_samples == 1);
+    in.avoidance.line_at = 300;
+    step(&model, &in, &out, 20);
+    assert(out.stop && model.avoidance.phase == S5_CENTER_LINE);
 }
 
 static void test_return_and_pivot_interlocks(void)
@@ -964,6 +1011,8 @@ int main(void)
     test_extra_pass_before_return(true);
     test_extra_pass_before_return(false);
     test_return_and_pivot_interlocks();
+    test_recovery_uses_available_room_and_hands_off_on_edge();
+    test_tape_already_under_sensor_at_start_of_search();
     test_widen_only_when_the_initial_lane_is_blocked();
     puts("PASS default left pivot, post-turn range, nested bypass, line recovery and cancellation");
 }

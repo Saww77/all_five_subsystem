@@ -20,6 +20,7 @@
 #define VC_RETRACE_MIN_MS 1800u
 #define VC_RETRACE_LONG_MS 3600u
 #define S5_LINE_DARK 420
+#define S5_RECOVERY_LINE_DARK 250
 #define S5_WIDE_MARKING 750
 #define VC_WAKE 1u
 
@@ -41,7 +42,8 @@ static unsigned return_clear_mm;
 
 static bool line_hit(void)
 {
-    return data.l >= S5_LINE_DARK || data.r >= S5_LINE_DARK;
+    unsigned darkness = model.avoidance.phase == S5_FIND_LINE ? S5_RECOVERY_LINE_DARK : S5_LINE_DARK;
+    return data.l >= darkness || data.r >= darkness;
 }
 static bool range_valid(uint32_t now)
 {
@@ -364,6 +366,8 @@ static S5_MOTION drive_feedback(const S2_STATUS *status, const S2_REPLY *reply,
     }
     if (!matched || !reply->accepted) return S5_MOTION_FAILED;
     if (busy) return S5_MOTION_PENDING;
+    if ((drive.command & 15u) == S2_ARC)
+        return s2_core_arc_finished((drive.command >> 4) != 0, status) ? S5_MOTION_DONE : S5_MOTION_FAILED;
     return s2_core_maneuver_finished(drive.command >> 4, status) ? S5_MOTION_DONE : S5_MOTION_FAILED;
 }
 
@@ -388,6 +392,8 @@ static void submit_output(const VC_INPUT *in, const VC_OUTPUT *out, const S2_REP
             submitted = motion_maneuver_reverse(out->maneuver.distance_mm, &drive.command);
         else if (action == S5_ADVANCE)
             submitted = motion_maneuver(out->maneuver.distance_mm, false, &drive.command);
+        else if (action == S5_ARC_LEFT || action == S5_ARC_RIGHT)
+            submitted = motion_arc(action == S5_ARC_RIGHT, &drive.command);
         else
             submitted = motion_maneuver(0, action == S5_PIVOT_RIGHT, &drive.command);
         drive.velocity = false;
@@ -457,13 +463,13 @@ static TMO vehicle_service_once(void)
        a crossing. On the original heading they straddle the tape. */
     in.avoidance.line_centered = !in.avoidance.line_hit &&
                                 data.l < S5_LINE_DARK && data.r < S5_LINE_DARK;
-    if (model.avoidance.phase == S5_FIND_LINE && !model.avoidance.depth &&
-        (in.avoidance.motion == S5_MOTION_PENDING || in.avoidance.motion == S5_MOTION_DONE)) {
-        unsigned min_cross_mm = s5_reentry_detection_mm(model.avoidance.offset_mm,
+    if (model.avoidance.phase == S5_FIND_LINE && !model.avoidance.depth) {
+        unsigned min_cross_mm = s5_reentry_detection_mm(s5_return_tape_distance_mm(&model.avoidance),
                                                         S5_IR_TO_AXLE_MM);
         unsigned progress_mm = model.avoidance.leg_progress_mm;
+        bool distance_command = in.avoidance.motion == S5_MOTION_PENDING || in.avoidance.motion == S5_MOTION_DONE;
         in.avoidance.near_original_line = progress_mm >= min_cross_mm ||
-                                       s2_core_distance_reached(min_cross_mm - progress_mm, &status);
+              (distance_command && s2_core_distance_reached(min_cross_mm - progress_mm, &status));
     }
     bool straight = model.state == VC_FOLLOW_LINE && in.avoidance.line_centered &&
                     in.left_rpm == in.right_rpm &&
@@ -556,6 +562,9 @@ static TMO vehicle_service_once(void)
     if (!dispatch_failed && (out.maneuver.action == S5_PIVOT_LEFT || out.maneuver.action == S5_PIVOT_RIGHT))
         tm_printf((UB*)"[S5] commanding %u deg pivot %s\n", S5_LATERAL_TURN_DEG,
                   out.maneuver.action == S5_PIVOT_LEFT ? "left" : "right");
+    if (!dispatch_failed && (out.maneuver.action == S5_ARC_LEFT || out.maneuver.action == S5_ARC_RIGHT))
+        tm_printf((UB*)"[S5] commanding %u deg rolling turn %s\n", S2_ARC_ANGLE_DEG,
+                  out.maneuver.action == S5_ARC_LEFT ? "left" : "right");
     if (previous == S5_VERIFY_RETURN && phase == S5_PASS && in.avoidance.return_received) {
         if (rear_clearance_pending)
             tm_printf((UB*)"[S5] side clear, advancing %u mm before rechecking rear clearance\n", pass);
