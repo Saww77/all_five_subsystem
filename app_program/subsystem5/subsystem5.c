@@ -386,7 +386,7 @@ static void bench_print_plan(const S5_PROFILE *profile)
     tm_printf((UB*)"[S5 BENCH] plan=%s turn=%u deg departure=%u mm lateral_offset=%u mm pass=%u mm\n",
               plan.side == S5_LEFT ? "T (left)" : "R (right)",
               S5_LATERAL_TURN_DEG, (unsigned)plan.offset_mm,
-              (unsigned)plan.offset_mm, (unsigned)plan.pass_mm);
+              (unsigned)plan.offset_mm, (unsigned)plan.pass_mm + S5_EXTRA_PASS_MM);
 }
 
 static void bench_task(INT stacd,void *exinf)

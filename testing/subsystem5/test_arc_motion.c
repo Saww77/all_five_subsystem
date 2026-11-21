@@ -75,8 +75,26 @@ static void run_arc(bool right)
     assert(duty[LEFT_IN_A] == 0 && duty[RIGHT_IN_A] == 0);
 }
 
+static void run_pivot(bool right)
+{
+    s2_core_init();
+    unsigned command = S2_MANEUVER_TURN | (unsigned)right;
+    assert(s2_core_maneuver(command));
+    sample(0, 0);
+    assert((duty[LEFT_IN_A] > 0) == right && (duty[LEFT_IN_B] > 0) == !right);
+    assert((duty[RIGHT_IN_A] > 0) == !right && (duty[RIGHT_IN_B] > 0) == right);
+
+    S2_STATUS status;
+    for (unsigned tick = 0; tick < 400 && s2_core_busy(); ++tick) sample(1, 1);
+    s2_core_snapshot(&status);
+    assert(s2_core_maneuver_finished(command, &status));
+    assert(s2_get_bits(&status,41,13) >= 255 && s2_get_bits(&status,54,13) >= 255);
+}
+
 int main(void)
 {
+    run_pivot(false);
+    run_pivot(true);
     run_arc(false);
     run_arc(true);
     assert(s2_core_arc(true));
@@ -86,5 +104,5 @@ int main(void)
     s2_core_snapshot(&status);
     assert(!s2_core_arc_finished(true, &status));
     assert(duty[LEFT_IN_A] == 0 && duty[RIGHT_IN_A] == 0);
-    puts("PASS rolling turns in both directions, encoder completion and interrupted arc");
+    puts("PASS pivot direction, encoder completion and interrupted arc");
 }

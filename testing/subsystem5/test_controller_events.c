@@ -41,8 +41,6 @@ unsigned s2_core_distance_travelled_mm(const S2_STATUS *status)
 { (void)status; return 55; }
 bool s2_core_maneuver_finished(unsigned arg, const S2_STATUS *status)
 { (void)arg; return s2_get_bits(status, 0, 2) == 0; }
-bool s2_core_arc_finished(bool right, const S2_STATUS *status)
-{ (void)right; return s2_get_bits(status, 0, 2) == 0; }
 bool motion_get_feedback(S2_STATUS *status, S2_REPLY *reply, bool *busy)
 {
     *status = motor;
@@ -82,13 +80,6 @@ bool motion_maneuver(unsigned mm, bool right, uint16_t *command)
 }
 bool motion_maneuver_reverse(unsigned mm, uint16_t *command)
 { (void)mm; (void)command; assert(0); return false; }
-bool motion_arc(bool right, uint16_t *command)
-{
-    assert(!queued_command);
-    *command = queued_command = (uint16_t)(S2_ARC | ((unsigned)right << 4));
-    motor_busy = true;
-    return true;
-}
 void subsystem5_request_scan(void) { ++scan_count; }
 
 static void motor_acknowledge(unsigned reason)
