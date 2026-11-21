@@ -15,6 +15,7 @@
 #define S5_UNKNOWN_WIDTH 2047u
 #define S5_MAX_PROJECTED_FRONT_MM 511u
 #define S5_PROFILE_TOLERANCE_MM 100u
+#define S5_TURN_CLEARANCE_MM 100u
 
 /* The reported offset uses the standard sweep so the wire format stays fixed. */
 static inline unsigned s5_servo_angle(unsigned scan_offset_deg)
@@ -43,7 +44,7 @@ typedef struct {
     unsigned width_status : 3;
     unsigned left_clipped : 1;
     unsigned right_clipped : 1;
-    signed left_edge_mm : 13; /* Bracketed edge or outermost observed lateral return (see valid bits). */
+    signed left_edge_mm : 13; /* Signed cross-track offset from the sonar centreline. */
     signed right_edge_mm : 13;
     unsigned left_edge_valid : 1;
     unsigned right_edge_valid : 1;

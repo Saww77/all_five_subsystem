@@ -21,7 +21,6 @@
 #define VC_RETRACE_LONG_MS 3600u
 #define S5_LINE_DARK 420
 #define S5_WIDE_MARKING 750
-#define S5_IR_TO_AXLE_MM 60u
 #define VC_WAKE 1u
 
 _Static_assert(S5_IR_TO_AXLE_MM > 0 && S5_IR_TO_AXLE_MM < 512u, "Axle offset must fit in 9 bits");
@@ -188,7 +187,7 @@ void vehicle_enable_obstacle_monitor(void)
     if (!lock()) return;
     pending.obstacle_monitor = true;
     pending.echo_quiet = false;
-    pending.follow_blocked = true;
+    pending.follow_blocked = false;
     obstacle_range = (S5_RANGE_GATE){.range_mm = S5_UNKNOWN_RANGE, .blocked = true};
     unlock();
     vehicle_notify_feedback();
@@ -208,8 +207,12 @@ static void submit_obstacle_reading(unsigned range, bool quiet)
     else accepted = s5_accept_range(&obstacle_range, range);
     if (accepted) {
         obstacle_range_at = now;
-        unsigned follow_limit = pending.follow_blocked ? S5_FOLLOW_CLEAR_MM : S5_FOLLOW_STOP_MM;
-        pending.follow_blocked = !s5_range_available(range) || range <= follow_limit;
+        /* Unknown range already blocks independently. Preserve the last
+           measured hysteresis decision without treating silence as near. */
+        if (s5_range_available(range)) {
+            unsigned follow_limit = pending.follow_blocked ? S5_FOLLOW_CLEAR_MM : S5_FOLLOW_STOP_MM;
+            pending.follow_blocked = range <= follow_limit;
+        }
         if (!vc_core_detouring(&model) && !data.obstacle_profile) {
             data.obstacle_valid = s5_range_measured(range);
             if (data.obstacle_valid) {
@@ -503,7 +506,7 @@ static TMO vehicle_service_once(void)
     unsigned offset = model.avoidance.offset_mm;
     unsigned pass = model.avoidance.next_pass_mm;
     unsigned depth = model.avoidance.depth;
-    bool rounded = model.avoidance.rounded_exit;
+    bool widening = model.avoidance.widening;
     /* Serialize dispatch with the request latch, so STOP can cancel an entire
        batch before any later movement is submitted. */
     submit_output(&in, &out, &reply, vc_core_detouring(&model));
@@ -553,11 +556,11 @@ static TMO vehicle_service_once(void)
     if (previous != phase) {
         tm_printf((UB*)"[S5] avoidance phase=%u side=%u at %u ms: %s\n",
                   (unsigned)phase, side, (unsigned)now, avoidance_phase_name[phase]);
-        if (phase == S5_TURN_OUT)
-            tm_printf((UB*)"[S5] bypass side=%s turn=%u deg offset=%u mm initial forward target=%u mm path=%s\n",
-                      side == S5_LEFT ? "T (left)" : "R (right)",
-                      rounded ? S2_ARC_ANGLE_DEG : S5_LATERAL_TURN_DEG,
-                      offset, pass, rounded ? "diagonal" : "pivot");
+        if (phase == S5_TURN_OUT && widening)
+            tm_printf((UB*)"[S5] lane still blocked, adding %u mm sideways\n", S5_OUTWARD_STEP_MM);
+        else if (phase == S5_TURN_OUT)
+            tm_printf((UB*)"[S5] bypass %s, sideways target=%u mm, initial forward target=%u mm\n",
+                      side == S5_LEFT ? "T (left)" : "R (right)", offset, pass);
         if (phase == S5_FAILED)
             tm_printf((UB*)"[S5] stopped during %s, detour reason=%u vehicle reason=%u\n",
                       avoidance_phase_name[previous], failure, reason);

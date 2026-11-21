@@ -80,8 +80,9 @@ static void test_scan_and_profile(void)
     for (unsigned i = 0; i < S5_SCAN_POINTS; ++i) assert(s5_scan_get(&scan, i) == 4000 + i);
     assert(s5_scan_target(&scan, S5_CLEAR_MM) == S5_NO_TARGET);
     s5_scan_set(&scan, S5_CENTRE_INDEX, S5_FOLLOW_STOP_MM);
-    assert(s5_scan_target(&scan, S5_CLEAR_MM) == S5_NO_TARGET);
     assert(s5_scan_target(&scan, S5_FOLLOW_CLEAR_MM) == S5_CENTRE_INDEX);
+    s5_scan_set(&scan, S5_CENTRE_INDEX, 392);
+    assert(s5_scan_target(&scan, S5_FOLLOW_CLEAR_MM) == S5_NO_TARGET);
     s5_scan_set(&scan, S5_CENTRE_INDEX, S5_UNKNOWN_RANGE);
     s5_scan_set(&scan, 24, 140);
     assert(s5_scan_target(&scan, S5_CLEAR_MM) == 24);
@@ -105,7 +106,7 @@ static void test_scan_and_profile(void)
     s5_scan_set(&scan, 15, 550);
     profile = s5_profile(&scan, 10, 15, 12, 0);
     assert(profile.width_mm == 14 && profile.right_mm == 550);
-    assert(profile.right_edge_valid && profile.right_edge_mm == 40);
+    assert(profile.right_edge_valid && profile.right_edge_mm == 8);
     s5_scan_set(&scan, 15, 30); /* A much closer return cannot bracket the far edge. */
     s5_scan_set(&scan, 16, 550); /* Too far from the last hit to confirm the edge. */
     profile = s5_profile(&scan, 10, 16, 12, 0);
@@ -176,6 +177,7 @@ static void test_width_from_unequal_off_centre_edges(void)
     /* Edges at 125 and 105 degrees give 79.85 mm at 180 and 220 mm. */
     assert(profile.width_mm == 40 && profile.width_status == S5_WIDTH_OK);
     assert(profile.left_mm == 810 && profile.right_mm == 650);
+    assert(profile.left_edge_mm == -99 && profile.right_edge_mm == -59);
 }
 
 static void test_measured_width_with_wide_beam(void)
@@ -190,7 +192,7 @@ static void test_measured_width_with_wide_beam(void)
         s5_scan_set(&scan, S5_CENTRE_INDEX + i, right[i]);
     S5_PROFILE profile = s5_profile(&scan, 1, 24, S5_CENTRE_INDEX, NULL);
     assert(profile.width_mm == 188 && profile.nearest_mm == 209);
-    assert(profile.left_edge_mm == -211 && profile.right_edge_mm == 243);
+    assert(profile.left_edge_mm == -81 && profile.right_edge_mm == 107);
 
     s5_scan_set(&scan, 3, S5_UNKNOWN_RANGE); /* Missing neighbour on the left. */
     s5_scan_set(&scan, 4, 229);              /* Another bearing still sees the corner. */
@@ -242,6 +244,7 @@ static void test_track_left_limit(void)
         assert(profile.left_clipped && !profile.right_clipped);
         assert(!profile.left_edge_valid && profile.right_edge_valid);
         assert(profile.nearest_mm == 218 && profile.right_mm == sweep[pass][24]);
+        assert(profile.front_mm >= 190 && profile.right_edge_mm < 110);
     }
 }
 
@@ -289,13 +292,29 @@ static void test_80_mm_bench_target_with_unstable_corner_ranges(void)
                                     S5_CENTRE_INDEX, NULL);
     assert(profile.nearest_mm == 189 && profile.left_edge_valid && profile.right_edge_valid);
     assert(profile.left_mm == 630 && profile.right_mm == 1196);
-    assert(profile.left_edge_mm == -213 && profile.right_edge_mm == 158);
+    assert(profile.left_edge_mm == -79 && profile.right_edge_mm == 63);
     /* The broad beam reported edge hits 85 degrees apart on the 80 mm target. */
     assert(profile.width_mm == 142 && profile.width_status == S5_WIDTH_OK);
 }
 
+static void test_centered_box_edge_coordinates(void)
+{
+    S5_SCAN scan = {0};
+    for (unsigned i = 0; i <= 12; ++i) {
+        unsigned range = i < 11 ? 230 : i == 11 ? 244 : S5_OPEN_RANGE;
+        s5_scan_set(&scan, S5_CENTRE_INDEX - i, range);
+        s5_scan_set(&scan, S5_CENTRE_INDEX + i, range);
+    }
+    S5_PROFILE profile = s5_profile(&scan, S5_CENTRE_INDEX - 12, S5_CENTRE_INDEX + 12,
+                                    S5_CENTRE_INDEX, NULL);
+    assert(profile.width_mm == 200 && profile.left_edge_valid && profile.right_edge_valid);
+    assert(profile.left_edge_mm == -100 && profile.right_edge_mm == 100);
+    assert(profile.front_mm > 200); /* Wide returns are outside the forward corridor. */
+}
+
 int main(void)
 {
+    test_centered_box_edge_coordinates();
     test_echo_pairing();
     test_rcwl_no_target();
     test_scan_and_profile();

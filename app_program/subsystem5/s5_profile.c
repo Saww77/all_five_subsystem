@@ -177,9 +177,12 @@ S5_PROFILE s5_profile(const S5_SCAN *scan, unsigned first, unsigned last, unsign
         unsigned bearing = s5_scan_bearing(i);
         if (bearing >= S5_MIN_ANGLE && bearing <= S5_MAX_ANGLE && range < s5_scan_get(scan, near))
             near = i;
-        unsigned forward = project_forward_mm(i, range);
-        if (forward < front) front = forward;
         int lateral = lateral_mm(i, range);
+        /* Off-path reflections at wide angles do not shorten the gap directly ahead. */
+        if (lateral >= -(int)S5_TURN_CLEARANCE_MM && lateral <= (int)S5_TURN_CLEARANCE_MM) {
+            unsigned forward = project_forward_mm(i, range);
+            if (forward < front) front = forward;
+        }
         if (lateral < left_hit) left_hit = lateral;
         if (lateral > right_hit) right_hit = lateral;
     }
@@ -214,13 +217,22 @@ S5_PROFILE s5_profile(const S5_SCAN *scan, unsigned first, unsigned last, unsign
     if (!result.left_edge_valid || !result.right_edge_valid) {
         result.width_status = result.left_edge_valid ? S5_WIDTH_RIGHT_EDGE :
                               result.right_edge_valid ? S5_WIDTH_LEFT_EDGE : S5_WIDTH_BOTH_EDGES;
-        return result;
+    } else {
+        /* The adjacent background returns confirm the edges. */
+        unsigned width = width_between_echoes_mm(s5_scan_get(scan, left.last_hit),
+                                                 s5_scan_get(scan, right.last_hit),
+                                                 right.last_hit - left.last_hit);
+        if (width > 0 && width <= MAX_WIDTH_MM) result.width_mm = (width + 1u) / 2u;
+        else result.width_status = S5_WIDTH_UNRESOLVED;
     }
-    /* Use the outermost obstacle hits. The adjacent background returns confirm the edges. */
-    unsigned width = width_between_echoes_mm(s5_scan_get(scan, left.last_hit),
-                                             s5_scan_get(scan, right.last_hit),
-                                             right.last_hit - left.last_hit);
-    if (width > 0 && width <= MAX_WIDTH_MM) result.width_mm = (width + 1u) / 2u;
-    else result.width_status = S5_WIDTH_UNRESOLVED;
+    if (result.width_mm != S5_UNKNOWN_WIDTH) {
+        /* Apply the same beam-width correction to the planned edges as to the
+           displayed width. Preserve the observed midpoint for off-centre boxes. */
+        int midpoint = left_hit + (int)((span + 1u) / 2u);
+        int left_estimate = midpoint - (int)((result.width_mm + 1u) / 2u);
+        int right_estimate = left_estimate + (int)result.width_mm;
+        if (result.left_edge_valid) result.left_edge_mm = left_estimate;
+        if (result.right_edge_valid) result.right_edge_mm = right_estimate;
+    }
     return result;
 }

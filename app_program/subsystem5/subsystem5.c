@@ -207,6 +207,9 @@ static BOOL scan_obstacle(S5_PROFILE *profile, BOOL verbose, const uint32_t *req
     tm_printf((UB*)"%s paths T(left %u deg)=%u mm R(right %u deg)=%u mm (4094=open, 4095=unavailable)\n",
               tag, S5_CENTRE_ANGLE + S5_CLEARANCE_BEARING_DEG, (unsigned)profile->left_path_mm,
               S5_CENTRE_ANGLE - S5_CLEARANCE_BEARING_DEG, (unsigned)profile->right_path_mm);
+    tm_printf((UB*)"%s edge offsets left=%d mm (%s), right=%d mm (%s)\n", tag,
+              (int)profile->left_edge_mm, profile->left_edge_valid ? "estimated" : "unconfirmed",
+              (int)profile->right_edge_mm, profile->right_edge_valid ? "estimated" : "unconfirmed");
     if (profile->width_status != S5_WIDTH_OK) {
         if (profile->width_mm == S5_UNKNOWN_WIDTH)
             tm_printf((UB*)"%s width=unavailable (%s) nearest_distance=%u mm\n",

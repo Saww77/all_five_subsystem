@@ -177,7 +177,7 @@ int main(void)
     motor_acknowledge(S2_REPLY_OK);
     work();
 
-    vehicle_submit_obstacle_range(S5_SCAN_STOP_MM);
+    vehicle_submit_obstacle_range(S5_FOLLOW_STOP_MM);
     work();
     assert(vehicle_state() == VC_AVOIDING && stop_count == 2 && scan_count == 2);
     assert(!vehicle_obstacle_scan_request(&request, NULL, NULL));
@@ -335,7 +335,8 @@ int main(void)
     vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
     assert(work() > 0 && model.avoidance.phase == S5_SHIFT_OUT && !queued_command);
     vehicle_submit_obstacle_range(860);
-    assert(work() > 0 && (queued_command >> 4) == 305);
+    unsigned left_offset = 90 + S5_SIDE_ALLOWANCE_MM + S5_UNCERTAIN_EDGE_MM;
+    assert(work() > 0 && (queued_command >> 4) == left_offset);
     motor_acknowledge(S2_REPLY_OK);
     work();
     S5_PING missed = s5_classify_echo(S5_ECHO_QUIET, 0);
@@ -356,7 +357,7 @@ int main(void)
     vehicle_submit_obstacle_range(860);
     assert(work() > 0 && !model.avoidance.waiting_echo);
     vehicle_notify_feedback();
-    assert(work() > 0 && (queued_command >> 4) == 250);
+    assert(work() > 0 && (queued_command >> 4) == left_offset - 55);
 
     /* Reproduce the completed parallel leg with the motor still settling. */
     vehicle_request_stop();
@@ -384,9 +385,9 @@ int main(void)
     vehicle_submit_obstacle_range(500);
     assert(!obstacle_blocked(clock_ms));
     vehicle_submit_obstacle_range(S5_FOLLOW_STOP_MM + 1);
-    assert(!obstacle_blocked(clock_ms));
+    assert(!obstacle_blocked(clock_ms) && obstacle_range.blocked);
     vehicle_submit_obstacle_range(S5_FOLLOW_STOP_MM);
-    assert(obstacle_blocked(clock_ms) && !obstacle_range.blocked);
+    assert(obstacle_blocked(clock_ms));
     vehicle_submit_obstacle_range(S5_FOLLOW_CLEAR_MM);
     assert(obstacle_blocked(clock_ms));
     vehicle_submit_obstacle_range(S5_FOLLOW_CLEAR_MM + 1);
