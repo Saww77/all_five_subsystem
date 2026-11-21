@@ -493,6 +493,7 @@ static TMO vehicle_service_once(void)
     }
     if (pending.start && blocker != VC_START_READY) data.last_start_reject = blocker;
     pending.start = pending.stop = pending.line_stop = false;
+    unsigned previous_reason = model.reason;
     S5_PHASE previous = model.avoidance.phase;
     unsigned previous_depth = model.avoidance.depth;
     vc_core_step(&model, &in, &out);
@@ -561,6 +562,9 @@ static TMO vehicle_service_once(void)
 
     if (scan) subsystem5_request_scan();
     if (dispatch_failed) vehicle_notify_feedback();
+    if (reason == VC_REASON_STALE_LINE && previous_reason != VC_REASON_STALE_LINE)
+        tm_printf((UB*)"[VC] stopped: local IR sample %s, last update %u ms ago\n",
+                  in.line_valid ? "expired" : "invalid", (unsigned)in.line_age_ms);
     if (out.maneuver.action == S5_RESCAN)
         tm_printf((UB*)"[S5] scan inconclusive, retrying while stopped\n");
     if (previous_depth < depth)
