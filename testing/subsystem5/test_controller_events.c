@@ -22,6 +22,7 @@ ID tk_cre_flg(const T_CFLG *config) { assert(!config->iflgptn); return 2; }
 ER tk_set_flg(ID id, UINT bits) { assert(id == 2); event_flags |= bits; return E_OK; }
 ER tk_get_otm(SYSTIM *time) { time->lo = clock_ms; return E_OK; }
 INT tm_printf(const UB *format, ...) { (void)format; return 0; }
+void s3_log_sampler_state(void) {}
 ID app_start_task(FP entry, PRI priority, UW cpu, const char *name)
 {
     (void)entry; (void)priority; (void)cpu; (void)name;

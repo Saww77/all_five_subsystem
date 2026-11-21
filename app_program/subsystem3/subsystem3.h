@@ -35,6 +35,7 @@ IMPORT BOOL s3_motion_turn(INT dir, INT steps);   /* dir < 0 = left, > 0 = right
 IMPORT INT  ir_read(INT ch);
 IMPORT ER   line_sense(INT *l, INT *c, INT *r);
 IMPORT void line_follow_task(INT stacd, void *exinf);
+IMPORT void s3_log_sampler_state(void);
 
 
 /* Motion Control calls go through motion_adapter.c (prints now, real later) */

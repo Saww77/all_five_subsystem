@@ -7,6 +7,23 @@
 #include "subsystem3.h"
 #include "../vehicle_controller/vehicle_controller.h"
 
+enum { S3_WAIT_TICK, S3_READ_ADC, S3_UPDATE_STEERING, S3_SUBMIT_LINE };
+LOCAL ID owner_id;
+LOCAL unsigned sampler_stage;
+
+EXPORT void s3_log_sampler_state(void)
+{
+    static const char *const stages[] = {
+        "waiting for timer", "reading ADC", "updating steering", "submitting IR sample",
+    };
+    ID task = __atomic_load_n(&owner_id, __ATOMIC_ACQUIRE);
+    unsigned stage = __atomic_load_n(&sampler_stage, __ATOMIC_RELAXED);
+    T_RTSK state = {0};
+    ER result = task > 0 ? tk_ref_tsk(task, &state) : E_NOEXS;
+    tm_printf((UB *)"[S3] IR sampler: %s, task state=%u, wait=0x%x, object=%d, status=%d\n",
+              stages[stage], state.tskstat, (unsigned)state.tskwait, state.wid, result);
+}
+
 
 /* Calibration: raw ADC on white paper and on the black line (L, C, R).
    Measure on your track before tuning the line thresholds. */
@@ -38,12 +55,11 @@ EXPORT ER line_sense(INT *left, INT *center, INT *right)
     return E_OK;
 }
 
-LOCAL ID owner_id;
-
 LOCAL void tick_release(void *exinf)
 {
     (void)exinf;
-    (void)tk_wup_tsk(owner_id);
+    ID task = __atomic_load_n(&owner_id, __ATOMIC_ACQUIRE);
+    (void)tk_wup_tsk(task);
 }
 
 /* Preserve the team's existing v2 telemetry encoding for A through D. */
@@ -59,26 +75,38 @@ EXPORT void line_follow_task(INT stacd, void *exinf)
     UW previous_tick = 0;
     unsigned last_barcode = 0;
     BOOL was_following = FALSE;
+    BOOL reported_missed_tick = FALSE;
     T_CCYC cyc = {0};
 
     (void)stacd;
     (void)exinf;
-    owner_id = tk_get_tid();
+    ID task = tk_get_tid();
+    __atomic_store_n(&owner_id, task, __ATOMIC_RELEASE);
     cyc.cycatr = TA_HLNG | TA_STA;
     cyc.cychdr = (FP)tick_release;
     cyc.cyctim = LINE_PERIOD_MS;
     cyc.cycphs = LINE_PERIOD_MS;
-    if (tk_cre_cyc(&cyc) < E_OK) {
-        tm_printf((UB *)"[S3] could not start line sampling\n");
-        vehicle_invalidate_line();
-        return;
-    }
+    ID timer = tk_cre_cyc(&cyc);
+    if (timer < E_OK)
+        tm_printf((UB *)"[S3] line timer creation failed (%d); using timed wakeups\n", timer);
 
     for (;;) {
-        if (tk_slp_tsk(TMO_FEVR) < E_OK) { continue; }
-        (void)tk_can_wup(owner_id);
+        __atomic_store_n(&sampler_stage, S3_WAIT_TICK, __ATOMIC_RELAXED);
+        /* The cyclic interrupt sets the normal cadence. A missed release
+           must not strand the task in sleep with an ageing IR sample. */
+        ER wake = tk_slp_tsk(2 * LINE_PERIOD_MS);
+        if (wake == E_TMOUT && timer >= E_OK && !reported_missed_tick) {
+            tm_printf((UB *)"[S3] missed line timer wakeup; retrying ADC sampling\n");
+            reported_missed_tick = TRUE;
+        } else if (wake < E_OK && wake != E_TMOUT) {
+            vehicle_invalidate_line();
+            (void)tk_dly_tsk(LINE_PERIOD_MS);
+            continue;
+        }
+        (void)tk_can_wup(task);
         (void)tk_get_otm(&time);
         INT left, center, right;
+        __atomic_store_n(&sampler_stage, S3_READ_ADC, __ATOMIC_RELAXED);
         if (line_sense(&left, &center, &right) < E_OK) {
             vehicle_invalidate_line();
             steering = (LF_STATE){0};
@@ -86,6 +114,7 @@ EXPORT void line_follow_task(INT stacd, void *exinf)
             continue;
         }
 
+        __atomic_store_n(&sampler_stage, S3_UPDATE_STEERING, __ATOMIC_RELAXED);
         BOOL following = vehicle_is_following();
         if (!following || !was_following) {
             last_barcode = 0;
@@ -105,6 +134,7 @@ EXPORT void line_follow_task(INT stacd, void *exinf)
 
         LF_CMD command;
         line_decide(left, center, right, &steering, &command);
+        __atomic_store_n(&sampler_stage, S3_SUBMIT_LINE, __ATOMIC_RELAXED);
         vehicle_submit_line(left, center < 0 ? 0 : center, right,
                             command.left, command.right, command.stop, last_barcode);
     }

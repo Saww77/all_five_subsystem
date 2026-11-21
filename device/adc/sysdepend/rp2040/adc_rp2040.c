@@ -106,7 +106,17 @@ LOCAL W adc_convert( INT ch, INT size, UW *buf )
 			 TWF_ORW | TWF_BITCLR, &flgptn, DEVCNF_ADC_TMOSCAN);
 
 	ADC_LOCK(intsts);
-	if(err < E_OK && ll_devcb.active) {
+	if(err == E_TMOUT) {
+		/* Only this request can have filled the FIFO since it was drained
+		   before arming. An interrupt that arrived late can still leave
+		   a usable result for this channel. */
+		if(ll_devcb.active && (in_w(ADC_FCS) & ADC_FCS_LEVEL)) {
+			*buf = in_w(ADC_FIFO) & 0x0FFF;
+			ll_devcb.asz = 1;
+		}
+		if(ll_devcb.asz == 1) err = E_OK;
+	}
+	if(ll_devcb.active) {
 		out_w(ADC_INTE, 0);
 		ll_devcb.active = FALSE;
 	}

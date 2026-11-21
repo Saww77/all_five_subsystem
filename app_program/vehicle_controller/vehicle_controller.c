@@ -571,9 +571,11 @@ static TMO vehicle_service_once(void)
 
     if (scan || (was_executing && !executing)) subsystem5_wake();
     if (dispatch_failed) vehicle_notify_feedback();
-    if (reason == VC_REASON_STALE_LINE && previous_reason != VC_REASON_STALE_LINE)
+    if (reason == VC_REASON_STALE_LINE && previous_reason != VC_REASON_STALE_LINE) {
         tm_printf((UB*)"[VC] stopped: local IR sample %s, last update %u ms ago\n",
                   in.line_valid ? "expired" : "invalid", (unsigned)in.line_age_ms);
+        s3_log_sampler_state();
+    }
     if (out.maneuver.action == S5_RESCAN)
         tm_printf((UB*)"[S5] scan inconclusive, retrying while stopped\n");
     if (!dispatch_failed && (out.maneuver.action == S5_ARC_LEFT || out.maneuver.action == S5_ARC_RIGHT))
@@ -594,7 +596,7 @@ static TMO vehicle_service_once(void)
                       avoidance_phase_name[previous], failure, reason,
                       in.avoidance.range_valid ? (unsigned)in.avoidance.range_mm : S5_UNKNOWN_RANGE,
                       last_echo, in.motor_faults, s2_get_bits(&status,41,13), s2_get_bits(&status,54,13));
-        if (previous == S5_FIND_LINE && failure == S5_FAIL_LINE)
+        if (previous == S5_FIND_LINE && (failure == S5_FAIL_LINE || reason == VC_REASON_STALE_LINE))
             tm_printf((UB*)"[S5] tape search %u/%u mm, edge samples left=%u right=%u, IR peak L/C/R=%u/%u/%u\n",
                       search_progress, search_limit, left_samples, right_samples,
                       tape_search_peak.left, tape_search_peak.center, tape_search_peak.right);
