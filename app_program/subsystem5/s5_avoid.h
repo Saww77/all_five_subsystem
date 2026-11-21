@@ -21,7 +21,7 @@
 #ifndef S5_CHASSIS_WIDTH_MM
 #define S5_CHASSIS_WIDTH_MM 160u /* Verify the widest point, including tyres. */
 #endif
-#define S5_SIDE_GAP_MM 40u
+#define S5_SIDE_GAP_MM 55u
 #define S5_SIDE_ALLOWANCE_MM ((S5_CHASSIS_WIDTH_MM + 1u) / 2u + S5_SIDE_GAP_MM)
 #ifndef S5_IR_TO_AXLE_MM
 #define S5_IR_TO_AXLE_MM 130u

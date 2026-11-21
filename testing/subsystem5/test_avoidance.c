@@ -460,7 +460,14 @@ static void test_centered_and_offset_boxes(void)
     scan.left_edge_mm = -100;
     scan.right_edge_mm = 100;
     S5_BYPASS plan = s5_plan_bypass(&scan);
-    assert(plan.side == S5_LEFT && plan.offset_mm == 100 + S5_SIDE_ALLOWANCE_MM);
+    assert(plan.side == S5_LEFT && plan.offset_mm == 235);
+
+    scan.left_path_mm = scan.right_path_mm = 399;
+    plan = s5_plan_bypass(&scan);
+    assert(plan.side == S5_NO_SIDE && plan.failure == S5_FAIL_SIDE);
+    scan.right_path_mm = 400;
+    plan = s5_plan_bypass(&scan);
+    assert(plan.side == S5_RIGHT && plan.offset_mm == 235);
 
     scan.left_edge_mm = -150;
     scan.right_edge_mm = 70;
@@ -568,17 +575,17 @@ static void test_lateral_bypass_at_start(void)
     VC_MODEL clear = model;
     VC_INPUT roomy = in;
     roomy.avoidance.range_mm = 1000;
-    start_move(&clear, &roomy, &out, S5_ADVANCE, 294);
+    start_move(&clear, &roomy, &out, S5_ADVANCE, 311);
     end_move(&clear, &roomy, &out);
     start_move(&clear, &roomy, &out, S5_ARC_LEFT, 0);
     end_move(&clear, &roomy, &out);
-    assert(clear.avoidance.pass_mm == 209);
-    start_move(&clear, &roomy, &out, S5_ADVANCE, 209);
+    assert(clear.avoidance.pass_mm == 200);
+    start_move(&clear, &roomy, &out, S5_ADVANCE, 200);
     end_move(&clear, &roomy, &out);
     assert(clear.avoidance.phase == S5_TURN_IN);
 
     in.avoidance.range_mm = 60;
-    start_move(&model, &in, &out, S5_ADVANCE, 294);
+    start_move(&model, &in, &out, S5_ADVANCE, 311);
 }
 
 static void test_stationary_retry(void)
@@ -786,20 +793,20 @@ static void test_rounded_bypass(bool left)
     end_move(&model, &in, &out);
     in.avoidance.range_mm = S5_OPEN_RANGE;
     in.obstacle_blocked = false;
-    start_move(&model, &in, &out, S5_ADVANCE, 139);
+    start_move(&model, &in, &out, S5_ADVANCE, 156);
     end_move(&model, &in, &out);
     start_move(&model, &in, &out, inward, 0);
     end_move(&model, &in, &out);
-    assert(model.avoidance.offset_mm == plan.offset_mm && model.avoidance.pass_mm == 520 - 244);
-    start_move(&model, &in, &out, S5_ADVANCE, 520 - 244);
+    assert(model.avoidance.offset_mm == plan.offset_mm && model.avoidance.pass_mm == 520 - 252);
+    start_move(&model, &in, &out, S5_ADVANCE, 520 - 252);
     assert(model.avoidance.phase == S5_PASS);
     end_move(&model, &in, &out);
     assert(model.avoidance.phase == S5_TURN_IN);
     in.avoidance.range_valid = false;
     start_move(&model, &in, &out, inward, 0);
     end_move(&model, &in, &out);
-    assert(model.avoidance.search_mm == 237 + S5_SEARCH_EXTENSION_MM);
-    cross_tape_and_center(&model, &in, &out, 47, 65, 139);
+    assert(model.avoidance.search_mm == 254 + S5_SEARCH_EXTENSION_MM);
+    cross_tape_and_center(&model, &in, &out, 64, 82, 156);
     start_move(&model, &in, &out, outward, 0);
     end_move(&model, &in, &out);
     in.avoidance.line_hit = true;
