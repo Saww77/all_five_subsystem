@@ -271,28 +271,6 @@ static BOOL setup(void)
 }
 
 #if !APP_S5_BENCH
-static unsigned check_return_path(S5_SIDE look_side, uint32_t request)
-{
-    _Static_assert(S5_RETURN_INNER_BEARING % S5_FINE_STEP == 0 &&
-                   S5_RETURN_OUTER_BEARING % S5_FINE_STEP == 0 &&
-                   S5_RETURN_OUTER_BEARING <= S5_MAX_ANGLE - S5_CENTRE_ANGLE,
-                   "Return bearings must be covered on both sides of the servo sweep");
-    unsigned inner_index = s5_side_scan_index(look_side, S5_RETURN_INNER_BEARING);
-    unsigned outer_index = s5_side_scan_index(look_side, S5_RETURN_OUTER_BEARING);
-    tm_printf((UB*)"[S5] checking %s of the car at %u and %u deg\n",
-              look_side == S5_LEFT ? "left" : "right", s5_scan_bearing(inner_index), s5_scan_bearing(outer_index));
-    unsigned inner = read_at(inner_index, FALSE, true, S5_UNKNOWN_RANGE);
-    unsigned outer = S5_UNKNOWN_RANGE;
-    if (vehicle_obstacle_scan_current(request))
-        outer = read_at(outer_index, FALSE, true, S5_UNKNOWN_RANGE);
-    aim(S5_CENTRE_ANGLE);
-    unsigned clearance = s5_return_clearance_mm(inner, outer);
-    if (clearance == S5_UNKNOWN_RANGE && vehicle_obstacle_scan_current(request))
-        tm_printf((UB*)"[S5] side scan inconclusive: %u deg=%u, %u deg=%u (4094=open, 4095=unavailable)\n",
-                  s5_scan_bearing(inner_index), inner, s5_scan_bearing(outer_index), outer);
-    return clearance;
-}
-
 static void scan_task(INT stacd, void *exinf)
 {
     (void)stacd;
@@ -309,17 +287,11 @@ static void scan_task(INT stacd, void *exinf)
         ER wake = tk_wai_flg(scan_event, SCAN_WAKE, TWF_ORW | TWF_BITCLR, &events, PING_INTERVAL_MS);
 
         uint32_t request;
-        S5_SIDE look_side;
         unsigned limit_mm;
-        if (wake == E_OK && vehicle_obstacle_scan_request(&request, &look_side, &limit_mm)) {
-            if (look_side != S5_NO_SIDE) {
-                unsigned clearance = check_return_path(look_side, request);
-                vehicle_finish_obstacle_return_check(clearance, request);
-            } else {
-                S5_PROFILE profile;
-                BOOL scanned = scan_obstacle(&profile, FALSE, &request, limit_mm);
-                vehicle_finish_obstacle_scan(scanned ? &profile : NULL, request);
-            }
+        if (wake == E_OK && vehicle_obstacle_scan_request(&request, &limit_mm)) {
+            S5_PROFILE profile;
+            BOOL scanned = scan_obstacle(&profile, FALSE, &request, limit_mm);
+            vehicle_finish_obstacle_scan(scanned ? &profile : NULL, request);
             /* The sweep finishes with a forward ping. */
             tk_dly_tsk(PING_INTERVAL_MS);
         } else if (wake != E_TMOUT) {
