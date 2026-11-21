@@ -286,7 +286,11 @@ static unsigned check_return_path(S5_SIDE look_side, uint32_t request)
     if (vehicle_obstacle_scan_current(request))
         outer = read_at(outer_index, FALSE, true, S5_UNKNOWN_RANGE);
     aim(S5_CENTRE_ANGLE);
-    return s5_return_clearance_mm(inner, outer);
+    unsigned clearance = s5_return_clearance_mm(inner, outer);
+    if (clearance == S5_UNKNOWN_RANGE && vehicle_obstacle_scan_current(request))
+        tm_printf((UB*)"[S5] side scan inconclusive: %u deg=%u, %u deg=%u (4094=open, 4095=unavailable)\n",
+                  s5_scan_bearing(inner_index), inner, s5_scan_bearing(outer_index), outer);
+    return clearance;
 }
 
 static void scan_task(INT stacd, void *exinf)

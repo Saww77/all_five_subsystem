@@ -312,6 +312,7 @@ static S5_AVOID_OUTPUT finish_forward_leg(S5_AVOID *state, const S5_AVOID_INPUT 
                 return go(state, S5_PASS, in->now);
             }
         }
+        state->return_scan_retried = false;
         return go(state, state->depth ? S5_TURN_IN : S5_VERIFY_RETURN, in->now);
     }
     case S5_FIND_LINE:
@@ -366,7 +367,12 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         if (!in->stopped || !in->return_received || !at_or_after(in->return_at, state->phase_at))
             return wait;
         unsigned required = state->offset_mm + RETURN_MARGIN_MM;
-        if (in->return_clear_mm == S5_UNKNOWN_RANGE) return fail(state, S5_FAIL_ECHO, in->now);
+        if (in->return_clear_mm == S5_UNKNOWN_RANGE) {
+            if (state->return_scan_retried) return fail(state, S5_FAIL_ECHO, in->now);
+            /* Stay stopped and keep the original deadline for the replacement scan. */
+            state->return_scan_retried = true;
+            return (S5_AVOID_OUTPUT){.action = S5_RESCAN};
+        }
         if (in->return_clear_mm < required)
             return search_farther_alongside(state, S5_PASS, in->now);
         if (state->rear_clearance_pending) {

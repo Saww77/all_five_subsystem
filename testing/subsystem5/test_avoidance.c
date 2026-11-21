@@ -974,7 +974,17 @@ static void test_return_and_pivot_interlocks(void)
     assert(state.next_pass_mm == S5_MAX_PASS_MM - 460 - S5_REAR_CLEARANCE_MM);
     state = (S5_AVOID){.phase = S5_VERIFY_RETURN, .phase_at = 100, .offset_mm = 225};
     in.return_clear_mm = S5_UNKNOWN_RANGE;
+    assert(s5_avoid_step(&state, &in).action == S5_RESCAN);
+    assert(state.phase == S5_VERIFY_RETURN && state.phase_at == 100 && state.return_scan_retried);
+    in.return_received = false;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT);
+    in.return_received = true;
+    S5_AVOID retry_failed = state;
+    in.now = in.return_at = 800;
+    assert(s5_avoid_step(&retry_failed, &in).action == S5_STOP && retry_failed.failure == S5_FAIL_ECHO);
+    in.now = in.return_at = 4600;
     assert(s5_avoid_step(&state, &in).action == S5_STOP && state.failure == S5_FAIL_ECHO);
+    in.now = in.return_at = 800;
     for (unsigned room = S5_SIDE_ALLOWANCE_MM - 1; room <= S5_SIDE_ALLOWANCE_MM; ++room) {
         state = (S5_AVOID){.phase = S5_VERIFY_RETURN, .phase_at = 100, .offset_mm = 220,
                            .rear_clearance_pending = true};
@@ -989,6 +999,24 @@ static void test_return_and_pivot_interlocks(void)
     in.range_mm = S5_TURN_CLEARANCE_MM - 1;
     in.motion = S5_MOTION_PENDING;
     assert(s5_avoid_step(&state, &in).action == S5_STOP && state.failure == S5_FAIL_CLOSE);
+}
+
+static void test_side_scan_recovery_preserves_rear_clearance(void)
+{
+    VC_MODEL model = {.state = VC_AVOIDING, .avoidance = {
+        .phase = S5_VERIFY_RETURN, .side = S5_RIGHT, .offset_mm = 220, .passed_mm = 265,
+    }};
+    VC_INPUT in = track_input();
+    VC_OUTPUT out;
+    in.avoidance.return_received = true;
+    in.avoidance.return_clear_mm = S5_UNKNOWN_RANGE;
+    in.avoidance.return_at = 20;
+    step(&model, &in, &out, 20);
+    assert(out.maneuver.action == S5_RESCAN && !model.avoidance.rear_clearance_pending);
+
+    clear_rear_and_recheck(&model, &in, &out);
+    assert(model.avoidance.passed_mm == 265 + S5_REAR_CLEARANCE_MM &&
+           !model.avoidance.return_scan_retried && model.avoidance.rounded_return);
 }
 
 static void test_rounded_departure_interlocks(void)
@@ -1073,6 +1101,7 @@ int main(void)
     test_rounded_bypass(true);
     test_rounded_bypass(false);
     test_return_and_pivot_interlocks();
+    test_side_scan_recovery_preserves_rear_clearance();
     test_rounded_departure_interlocks();
     test_recovery_uses_available_room_and_hands_off_on_edge();
     test_blank_floor_after_alignment_stops();

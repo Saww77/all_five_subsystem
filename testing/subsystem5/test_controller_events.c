@@ -382,11 +382,34 @@ int main(void)
                (bypass_side == S5_RIGHT ? 150 : 30));
         vehicle_finish_obstacle_scan(NULL, request);
         assert(vehicle_obstacle_scan_current(request) && !pending.return_received);
-        vehicle_request_stop();
+
+        clock_ms += S5_RANGE_MAX_AGE_MS + 1;
+        vehicle_submit_line(0, 0, 0, 30, 30, FALSE, 0);
+        assert(vehicle_get_snapshot(&snapshot) && snapshot.obstacle_forward_mm == S5_UNKNOWN_RANGE &&
+               !snapshot.obstacle_no_echo); /* The servo is intentionally checking the side. */
+        vehicle_finish_obstacle_return_check(S5_UNKNOWN_RANGE, request);
+        assert(vehicle_get_snapshot(&snapshot) && !snapshot.obstacle_no_echo);
         work();
-        assert(!vehicle_obstacle_scan_current(request));
+        uint32_t retry_request;
+        assert(scan_count == scans_before + 2 && vehicle_state() == VC_AVOIDING && !queued_command);
+        assert(vehicle_obstacle_scan_request(&retry_request, &look_side, NULL) && retry_request != request);
+        assert(look_side == (bypass_side == S5_RIGHT ? S5_LEFT : S5_RIGHT));
         vehicle_finish_obstacle_return_check(S5_OPEN_RANGE, request);
-        assert(!pending.return_received && !queued_command);
+        assert(vehicle_obstacle_scan_current(retry_request) && !pending.return_received);
+
+        if (bypass_side == S5_LEFT) {
+            vehicle_request_stop();
+            work();
+            vehicle_finish_obstacle_return_check(S5_OPEN_RANGE, retry_request);
+            assert(!pending.return_received && !queued_command);
+        } else {
+            vehicle_finish_obstacle_return_check(S5_UNKNOWN_RANGE, retry_request);
+            work();
+            vehicle_submit_obstacle_range(600);
+            assert(vehicle_get_snapshot(&snapshot) && snapshot.state == VC_FAULT &&
+                   snapshot.avoidance_failure == S5_FAIL_ECHO && snapshot.obstacle_no_echo &&
+                   snapshot.obstacle_forward_mm == 600 && !queued_command);
+        }
     }
     vehicle_submit_obstacle_range(500);
     assert(!obstacle_blocked(clock_ms));

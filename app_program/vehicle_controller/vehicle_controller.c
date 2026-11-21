@@ -323,8 +323,12 @@ BOOL vehicle_get_snapshot(VEHICLE_SNAPSHOT *out)
     *out=data;out->timestamp_ms=now_ms();out->motor_ready=ready;out->link_ready=linked;
     out->start_pending=pending.start;out->stop_pending=pending.stop;out->reset_pending=pending.reset;
     out->obstacle_blocked = obstacle_blocked(out->timestamp_ms);
-    out->obstacle_no_echo = pending.obstacle_monitor && !range_valid(out->timestamp_ms) &&
-                            (model.avoidance.phase != S5_PROFILE_PATH || pending.profile_valid);
+    S5_PHASE phase = model.avoidance.phase;
+    /* Forward samples naturally age out while the servo makes the side check. */
+    bool scanning = (phase == S5_PROFILE_PATH && !pending.profile_valid) || phase == S5_VERIFY_RETURN;
+    bool echo_fault = phase == S5_FAILED && model.avoidance.failure == S5_FAIL_ECHO;
+    out->obstacle_no_echo = pending.obstacle_monitor &&
+                            (echo_fault || (!scanning && !range_valid(out->timestamp_ms)));
     out->avoidance_phase = model.avoidance.phase;
     out->avoidance_side = model.avoidance.side;
     out->avoidance_failure = model.avoidance.failure;

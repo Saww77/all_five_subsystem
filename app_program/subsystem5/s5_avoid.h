@@ -90,7 +90,7 @@ typedef struct {
     unsigned leg_progress_mm:10, issued_mm:10, waiting_echo:1, short_approach:1;
     unsigned blocked_range_mm:12;
     unsigned widening:1, additional_outward_mm:6, rear_clearance_pending:1, rounded_return:1;
-    unsigned rounded_departure:1;
+    unsigned rounded_departure:1, return_scan_retried:1;
 } S5_AVOID;
 typedef struct {
     uint16_t action : 4;
