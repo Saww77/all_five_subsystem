@@ -57,7 +57,7 @@ typedef struct {
 
 void s5_scan_set(S5_SCAN *scan, unsigned index, unsigned range);
 unsigned s5_scan_get(const S5_SCAN *scan, unsigned index);
-unsigned s5_scan_target(const S5_SCAN *scan);
+unsigned s5_scan_target(const S5_SCAN *scan, unsigned limit_mm);
 bool s5_same_obstacle(unsigned range, unsigned reference);
 bool s5_background_beyond(unsigned range, unsigned reference);
 /* Confirm a background bearing from the full fine-scan sample window. */

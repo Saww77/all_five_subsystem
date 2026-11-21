@@ -5,7 +5,7 @@
 #define MIN_DISTANT_ECHOES 3u
 #define WIDTH_COS_SCALE 65536u
 
-_Static_assert(S5_CLEAR_MM <= S5_MAX_PROJECTED_FRONT_MM, "Front projection must cover the obstacle window");
+_Static_assert(S5_FOLLOW_CLEAR_MM <= S5_MAX_PROJECTED_FRONT_MM, "Front projection must cover the obstacle window");
 
 /* sin and cos for 0..75 degrees in steps of 5 degrees, scaled by 1024. */
 static const unsigned short sine[] = {
@@ -70,12 +70,12 @@ unsigned s5_scan_get(const S5_SCAN *scan, unsigned index)
     return (word >> ((index & 1u) * 4u)) & 4095u;
 }
 
-unsigned s5_scan_target(const S5_SCAN *scan)
+unsigned s5_scan_target(const S5_SCAN *scan, unsigned limit_mm)
 {
     /* Give priority to a return directly in the vehicle's path. */
-    if (s5_scan_get(scan, S5_CENTRE_INDEX) <= S5_CLEAR_MM) return S5_CENTRE_INDEX;
+    if (s5_scan_get(scan, S5_CENTRE_INDEX) <= limit_mm) return S5_CENTRE_INDEX;
     unsigned target = S5_NO_TARGET;
-    unsigned closest = S5_CLEAR_MM + 1;
+    unsigned closest = limit_mm + 1;
     for (unsigned i = S5_COARSE_FIRST; i <= S5_COARSE_LAST; i += S5_COARSE_STEP) {
         unsigned range = s5_scan_get(scan, i);
         if (range < closest) {

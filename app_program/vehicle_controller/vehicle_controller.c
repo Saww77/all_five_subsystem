@@ -31,7 +31,7 @@ static VEHICLE_SNAPSHOT data;
 static VC_MODEL model;
 static struct {
     unsigned start:1, stop:1, line_stop:1, auto_start:1, reset:1;
-    unsigned obstacle_monitor:1, profile_valid:1, scan:2, echo_quiet:1, return_received:1;
+    unsigned obstacle_monitor:1, profile_valid:1, scan:2, echo_quiet:1, return_received:1, follow_blocked:1;
 } pending;
 static uint32_t reset_started, reset_refreshed;
 static S5_RANGE_GATE obstacle_range;
@@ -51,7 +51,7 @@ static bool range_valid(uint32_t now)
 }
 static bool obstacle_blocked(uint32_t now)
 {
-    return pending.obstacle_monitor && (obstacle_range.blocked || !range_valid(now));
+    return pending.obstacle_monitor && (pending.follow_blocked || !range_valid(now));
 }
 static uint32_t now_ms(void) { SYSTIM t;tk_get_otm(&t);return t.lo; }
 static BOOL lock(void) { return guard>0 && tk_loc_mtx(guard,TMO_FEVR)>=E_OK; }
@@ -188,6 +188,7 @@ void vehicle_enable_obstacle_monitor(void)
     if (!lock()) return;
     pending.obstacle_monitor = true;
     pending.echo_quiet = false;
+    pending.follow_blocked = true;
     obstacle_range = (S5_RANGE_GATE){.range_mm = S5_UNKNOWN_RANGE, .blocked = true};
     unlock();
     vehicle_notify_feedback();
@@ -207,6 +208,8 @@ static void submit_obstacle_reading(unsigned range, bool quiet)
     else accepted = s5_accept_range(&obstacle_range, range);
     if (accepted) {
         obstacle_range_at = now;
+        unsigned follow_limit = pending.follow_blocked ? S5_FOLLOW_CLEAR_MM : S5_FOLLOW_STOP_MM;
+        pending.follow_blocked = !s5_range_available(range) || range <= follow_limit;
         if (!vc_core_detouring(&model) && !data.obstacle_profile) {
             data.obstacle_valid = s5_range_measured(range);
             if (data.obstacle_valid) {
@@ -239,7 +242,7 @@ static BOOL scan_wanted(void)
     return (profile || return_check) && !pending.stop && !pending.line_stop;
 }
 
-BOOL vehicle_obstacle_scan_request(uint32_t *request, S5_SIDE *check_side)
+BOOL vehicle_obstacle_scan_request(uint32_t *request, S5_SIDE *check_side, unsigned *limit_mm)
 {
     if (!request || !lock()) return FALSE;
     BOOL allowed = scan_wanted() && pending.scan == SCAN_READY;
@@ -247,6 +250,7 @@ BOOL vehicle_obstacle_scan_request(uint32_t *request, S5_SIDE *check_side)
         *request = scan_request_id;
         if (check_side)
             *check_side = model.avoidance.phase == S5_VERIFY_RETURN ? model.avoidance.side : S5_NO_SIDE;
+        if (limit_mm) *limit_mm = model.avoidance.depth ? S5_CLEAR_MM : S5_FOLLOW_CLEAR_MM;
         pending.scan = SCAN_ACTIVE;
     }
     unlock();
@@ -541,7 +545,8 @@ static TMO vehicle_service_once(void)
     if (previous_depth < depth)
         tm_printf((UB*)"[S5] new obstacle on detour, scanning from the interrupted leg\n");
     if (!dispatch_failed && (out.maneuver.action == S5_ARC_LEFT || out.maneuver.action == S5_ARC_RIGHT))
-        tm_printf((UB*)"[S5] rolling turn %s\n", out.maneuver.action == S5_ARC_LEFT ? "left" : "right");
+        tm_printf((UB*)"[S5] rolling turn %u deg %s\n", S2_ARC_ANGLE_DEG,
+                  out.maneuver.action == S5_ARC_LEFT ? "left" : "right");
     if (previous == S5_VERIFY_RETURN && phase == S5_PASS && in.avoidance.return_received)
         tm_printf((UB*)"[S5] return corridor obstructed at %u mm lateral, passing %u mm farther\n",
                   (unsigned)in.avoidance.return_clear_mm, pass);
@@ -551,7 +556,8 @@ static TMO vehicle_service_once(void)
         if (phase == S5_TURN_OUT)
             tm_printf((UB*)"[S5] bypass side=%s turn=%u deg offset=%u mm initial forward target=%u mm path=%s\n",
                       side == S5_LEFT ? "T (left)" : "R (right)",
-                      S5_LATERAL_TURN_DEG, offset, pass, rounded ? "rounded" : "pivot");
+                      rounded ? S2_ARC_ANGLE_DEG : S5_LATERAL_TURN_DEG,
+                      offset, pass, rounded ? "diagonal" : "pivot");
         if (phase == S5_FAILED)
             tm_printf((UB*)"[S5] stopped during %s, detour reason=%u vehicle reason=%u\n",
                       avoidance_phase_name[previous], failure, reason);

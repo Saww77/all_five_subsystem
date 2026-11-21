@@ -6,9 +6,9 @@
 #include "s5_profile.h"
 
 #define S5_RANGE_MAX_AGE_MS 300u
-#define S5_SLOW_RANGE_MM 350u
+#define S5_SLOW_RANGE_MM 500u
 #define S5_MANEUVER_STOP_MM 150u
-#define S5_MAX_PASS_MM 500u
+#define S5_MAX_PASS_MM 650u
 #define S5_APPROACH_RPM 20u
 #define S5_CLEARANCE_BEARING_DEG 45u
 #define S5_LATERAL_TURN_DEG 90u
@@ -55,7 +55,7 @@ typedef struct {
     bool return_received : 1;
 } S5_AVOID_INPUT;
 typedef struct {
-    unsigned phase:5, side:2, offset_mm:10, next_pass_mm:9;
+    unsigned phase:5, side:2, offset_mm:10, next_pass_mm:10;
     unsigned passed_mm:10, progress_mm:10, line_goal_mm:10;
     unsigned rounded_exit:1, rounded_return:1;
 } S5_INTERRUPTED_LEG;
@@ -65,7 +65,7 @@ typedef struct {
     S5_INTERRUPTED_LEG interrupted[S5_NESTED_LIMIT];
     unsigned phase:5, side:2, line_samples:2, reverse_available:1;
     unsigned reverse_long:1, scan_retried:1, probe_left:1, failure:4, failed_phase:5;
-    unsigned offset_mm:10, next_pass_mm:9, passed_mm:10, depth:2;
+    unsigned offset_mm:10, next_pass_mm:10, passed_mm:10, depth:2;
     unsigned leg_progress_mm:10, issued_mm:10, waiting_echo:1, short_approach:1;
     unsigned blocked_range_mm:12;
     unsigned rounded_exit:1, rounded_return:1;
@@ -76,8 +76,8 @@ typedef struct {
 } S5_AVOID_OUTPUT;
 
 typedef struct {
-    unsigned side:2, failure:4, probe_left:1;
-    unsigned offset_mm:9, pass_mm:9;
+    unsigned side:2, failure:4, probe_left:1, rounded_exit:1;
+    unsigned offset_mm:9, pass_mm:10;
 } S5_BYPASS;
 
 S5_BYPASS s5_plan_bypass(const S5_PROFILE *profile);

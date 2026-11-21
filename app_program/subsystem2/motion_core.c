@@ -226,12 +226,11 @@ bool s2_core_maneuver(unsigned arg)
 
 static unsigned arc_counts(bool inside,unsigned wheel)
 {
-    /* For a quarter turn, the wheel path is pi/2 times its own radius.
-       Pi cancels when converting the path to wheel revolutions. */
+    /* Wheel revolutions = arc fraction * path diameter / wheel diameter. */
     unsigned diameter=2u*S2_ARC_RADIUS_MM;
     unsigned path_diameter=inside?diameter-EFFECTIVE_TRACK_MM:diameter+EFFECTIVE_TRACK_MM;
-    unsigned denominator=4u*WHEEL_DIAMETER_MM*10u;
-    return (path_diameter*cpr(wheel)+denominator/2u)/denominator;
+    unsigned denominator=360u*WHEEL_DIAMETER_MM*10u;
+    return (path_diameter*cpr(wheel)*S2_ARC_ANGLE_DEG+denominator/2u)/denominator;
 }
 
 bool s2_core_arc(bool right)

@@ -19,7 +19,7 @@ BOOL vehicle_submit_terrain(unsigned height_mm,unsigned phase);
 void vehicle_enable_obstacle_monitor(void);
 void vehicle_submit_obstacle_range(unsigned range_mm);
 void vehicle_submit_obstacle_ping(S5_PING ping);
-BOOL vehicle_obstacle_scan_request(uint32_t *request, S5_SIDE *check_side);
+BOOL vehicle_obstacle_scan_request(uint32_t *request, S5_SIDE *check_side, unsigned *limit_mm);
 BOOL vehicle_obstacle_scan_current(uint32_t request);
 void vehicle_finish_obstacle_scan(const S5_PROFILE *profile, uint32_t request);
 void vehicle_finish_obstacle_return_check(unsigned clear_mm, uint32_t request);

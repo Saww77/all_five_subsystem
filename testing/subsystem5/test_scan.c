@@ -78,14 +78,18 @@ static void test_scan_and_profile(void)
         s5_scan_set(&scan, i, 4000 + i);
     }
     for (unsigned i = 0; i < S5_SCAN_POINTS; ++i) assert(s5_scan_get(&scan, i) == 4000 + i);
-    assert(s5_scan_target(&scan) == S5_NO_TARGET);
+    assert(s5_scan_target(&scan, S5_CLEAR_MM) == S5_NO_TARGET);
+    s5_scan_set(&scan, S5_CENTRE_INDEX, S5_FOLLOW_STOP_MM);
+    assert(s5_scan_target(&scan, S5_CLEAR_MM) == S5_NO_TARGET);
+    assert(s5_scan_target(&scan, S5_FOLLOW_CLEAR_MM) == S5_CENTRE_INDEX);
+    s5_scan_set(&scan, S5_CENTRE_INDEX, S5_UNKNOWN_RANGE);
     s5_scan_set(&scan, 24, 140);
-    assert(s5_scan_target(&scan) == 24);
+    assert(s5_scan_target(&scan, S5_CLEAR_MM) == 24);
     S5_PROFILE clipped = s5_profile(&scan, 23, 24, 24, 0);
     assert(s5_servo_angle(clipped.angle_offset_deg) == 30);
     assert(clipped.width_mm == S5_UNKNOWN_WIDTH && !clipped.right_edge_valid);
     s5_scan_set(&scan, 12, 150);
-    assert(s5_scan_target(&scan) == 12);
+    assert(s5_scan_target(&scan, S5_CLEAR_MM) == 12);
     s5_scan_set(&scan, 10, 410);
     s5_scan_set(&scan, 11, 140);
     s5_scan_set(&scan, 13, 150);
@@ -232,7 +236,7 @@ static void test_track_left_limit(void)
     for (unsigned pass = 0; pass < sizeof(sweep) / sizeof(*sweep); ++pass) {
         S5_SCAN scan = {0};
         for (unsigned i = 0; i < S5_SCAN_POINTS; ++i) s5_scan_set(&scan, i, sweep[pass][i]);
-        assert(s5_scan_target(&scan) == S5_CENTRE_INDEX);
+        assert(s5_scan_target(&scan, S5_CLEAR_MM) == S5_CENTRE_INDEX);
         S5_PROFILE profile = s5_profile(&scan, 0, S5_SCAN_POINTS - 1, S5_CENTRE_INDEX, NULL);
         assert(profile.width_mm == (pass == 0 ? 200 : 201) && profile.width_status == S5_WIDTH_LEFT_EDGE);
         assert(profile.left_clipped && !profile.right_clipped);

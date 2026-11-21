@@ -146,10 +146,12 @@ int main(void)
     assert(vehicle_request_start());
     vehicle_submit_obstacle_range(S5_UNKNOWN_RANGE);
     assert(work() > 0 && vehicle_state() == VC_AVOIDING && !command_count);
-    assert(scan_count == 1 && vehicle_obstacle_scan_request(&request, NULL));
+    unsigned scan_limit;
+    assert(scan_count == 1 && vehicle_obstacle_scan_request(&request, NULL, &scan_limit));
+    assert(scan_limit == S5_FOLLOW_CLEAR_MM);
     clock_ms += 20;
     vehicle_finish_obstacle_scan(NULL, request);
-    assert(work() > 0 && scan_count == 2 && vehicle_obstacle_scan_request(&request, NULL));
+    assert(work() > 0 && scan_count == 2 && vehicle_obstacle_scan_request(&request, NULL, NULL));
     clock_ms += 20;
     vehicle_finish_obstacle_scan(NULL, request);
     assert(work() > 0 && !command_count && vehicle_state() == VC_AVOIDING);
@@ -178,10 +180,10 @@ int main(void)
     vehicle_submit_obstacle_range(S5_SCAN_STOP_MM);
     work();
     assert(vehicle_state() == VC_AVOIDING && stop_count == 2 && scan_count == 2);
-    assert(!vehicle_obstacle_scan_request(&request, NULL));
+    assert(!vehicle_obstacle_scan_request(&request, NULL, NULL));
     motor_stopped();
     work();
-    assert(scan_count == 3 && vehicle_obstacle_scan_request(&request, NULL));
+    assert(scan_count == 3 && vehicle_obstacle_scan_request(&request, NULL, NULL));
     assert(vehicle_obstacle_scan_current(request));
 
     connection = 0;
@@ -234,7 +236,7 @@ int main(void)
     work();
     motor_stopped();
     work();
-    assert(vehicle_obstacle_scan_request(&request, NULL));
+    assert(vehicle_obstacle_scan_request(&request, NULL, NULL));
 
     S5_PROFILE unresolved = {.nearest_mm = 208, .front_mm = 203, .width_mm = S5_UNKNOWN_WIDTH,
                              .angle_offset_deg = 60, .left_mm = S5_UNKNOWN_RANGE, .right_mm = S5_UNKNOWN_RANGE,
@@ -242,7 +244,7 @@ int main(void)
     uint32_t first_request = request;
     clock_ms += 20;
     vehicle_finish_obstacle_scan(&unresolved, request);
-    assert(work() > 0 && vehicle_obstacle_scan_request(&request, NULL) && request != first_request);
+    assert(work() > 0 && vehicle_obstacle_scan_request(&request, NULL, NULL) && request != first_request);
     clock_ms += 20;
     vehicle_finish_obstacle_scan(&unresolved, request);
     assert(work() > 0 && vehicle_state() == VC_AVOIDING);
@@ -268,7 +270,7 @@ int main(void)
     unsigned before_start = command_count;
     assert(vehicle_request_start());
     assert(work() > 0 && vehicle_state() == VC_AVOIDING && command_count == before_start);
-    assert(vehicle_obstacle_scan_request(&request, NULL));
+    assert(vehicle_obstacle_scan_request(&request, NULL, NULL));
     S5_PROFILE saved = {
         .nearest_mm = 196, .front_mm = 196, .width_mm = 294, .angle_offset_deg = 60,
         .left_path_mm = 208, .right_path_mm = 651, .left_edge_mm = -254, .right_edge_mm = 40,
@@ -307,10 +309,11 @@ int main(void)
     unsigned stops_before = stop_count;
     vehicle_submit_obstacle_range(200);
     assert(work() > 0 && stop_count == stops_before + 1 && scan_count == scans_before);
-    assert(!vehicle_obstacle_scan_request(&request, NULL));
+    assert(!vehicle_obstacle_scan_request(&request, NULL, NULL));
     assert(model.avoidance.depth == 1 && model.avoidance.interrupted[0].progress_mm == 55);
     motor_stopped();
-    assert(work() > 0 && scan_count == scans_before + 1 && vehicle_obstacle_scan_request(&request, NULL));
+    assert(work() > 0 && scan_count == scans_before + 1 && vehicle_obstacle_scan_request(&request, NULL, &scan_limit));
+    assert(scan_limit == S5_CLEAR_MM);
     assert(vehicle_get_snapshot(&snapshot) && snapshot.state == VC_AVOIDING);
     S5_PROFILE default_left = {.nearest_mm = 202, .front_mm = 190, .width_mm = 145, .angle_offset_deg = 65,
                                .left_mm = S5_UNKNOWN_RANGE, .right_mm = S5_UNKNOWN_RANGE,
@@ -365,11 +368,11 @@ int main(void)
     vehicle_notify_feedback();
     scans_before = scan_count;
     work();
-    assert(scan_count == scans_before && !vehicle_obstacle_scan_request(&request, NULL));
+    assert(scan_count == scans_before && !vehicle_obstacle_scan_request(&request, NULL, NULL));
     motor_stopped();
     work();
     S5_SIDE check_side = S5_NO_SIDE;
-    assert(scan_count == scans_before + 1 && vehicle_obstacle_scan_request(&request, &check_side));
+    assert(scan_count == scans_before + 1 && vehicle_obstacle_scan_request(&request, &check_side, NULL));
     assert(check_side == S5_RIGHT);
     vehicle_finish_obstacle_scan(NULL, request);
     assert(vehicle_obstacle_scan_current(request) && !pending.return_received);
@@ -378,6 +381,16 @@ int main(void)
     assert(!vehicle_obstacle_scan_current(request));
     vehicle_finish_obstacle_return_check(S5_OPEN_RANGE, request);
     assert(!pending.return_received && !queued_command);
+    vehicle_submit_obstacle_range(500);
+    assert(!obstacle_blocked(clock_ms));
+    vehicle_submit_obstacle_range(S5_FOLLOW_STOP_MM + 1);
+    assert(!obstacle_blocked(clock_ms));
+    vehicle_submit_obstacle_range(S5_FOLLOW_STOP_MM);
+    assert(obstacle_blocked(clock_ms) && !obstacle_range.blocked);
+    vehicle_submit_obstacle_range(S5_FOLLOW_CLEAR_MM);
+    assert(obstacle_blocked(clock_ms));
+    vehicle_submit_obstacle_range(S5_FOLLOW_CLEAR_MM + 1);
+    assert(!obstacle_blocked(clock_ms));
 
     puts("PASS MQTT loss, local STOP, left pivot, one missed echo and resume after echo recovery");
 }

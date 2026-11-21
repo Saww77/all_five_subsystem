@@ -66,6 +66,11 @@ static void run_arc(bool right)
     s2_core_snapshot(&status);
     assert(s2_core_arc_finished(right, &status));
     assert(!s2_core_arc_finished(!right, &status));
+    double left_rev = s2_get_bits(&status, 41, 13) * 10.0 / LEFT_CPR_X10;
+    double right_rev = s2_get_bits(&status, 54, 13) * 10.0 / RIGHT_CPR_X10;
+    double yaw = 180.0 * WHEEL_DIAMETER_MM * (right_rev - left_rev) / EFFECTIVE_TRACK_MM;
+    double magnitude = right ? -yaw : yaw;
+    assert(magnitude > 59.0 && magnitude < 61.0);
     assert(s2_get_bits(&status, 2, 3) == 0);
     assert(duty[LEFT_IN_A] == 0 && duty[RIGHT_IN_A] == 0);
 }

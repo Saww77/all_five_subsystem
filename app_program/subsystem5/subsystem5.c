@@ -147,14 +147,14 @@ static void confirm_pivot(S5_PROFILE *profile, uint32_t request)
         tm_printf((UB*)"[S5] near-forward return verified at %u deg for the left pivot\n", angle);
 }
 
-static BOOL scan_obstacle(S5_PROFILE *profile, BOOL verbose, const uint32_t *request)
+static BOOL scan_obstacle(S5_PROFILE *profile, BOOL verbose, const uint32_t *request, unsigned limit_mm)
 {
     const char *tag = verbose ? "[S5 BENCH]" : "[S5]";
     S5_SCAN samples = {0};
     tm_printf((UB*)"%s confirming forward target before GP12 coarse sweep\n", tag);
     unsigned centre = read_at(S5_CENTRE_INDEX, verbose, true, S5_UNKNOWN_RANGE);
     s5_scan_set(&samples, S5_CENTRE_INDEX, centre);
-    if (request && s5_range_available(centre) && centre > S5_CLEAR_MM) {
+    if (request && s5_range_available(centre) && centre > limit_mm) {
         vehicle_submit_obstacle_range(centre);
         if(centre==S5_OPEN_RANGE)vehicle_submit_obstacle_range(centre); /* read_at confirmed it */
         *profile = (S5_PROFILE){.nearest_mm = S5_OPEN_RANGE};
@@ -166,11 +166,11 @@ static BOOL scan_obstacle(S5_PROFILE *profile, BOOL verbose, const uint32_t *req
         s5_scan_set(&samples, i, read_at(i, verbose, false, S5_UNKNOWN_RANGE));
     }
 
-    unsigned anchor = s5_scan_target(&samples);
+    unsigned anchor = s5_scan_target(&samples, limit_mm);
     if (anchor == S5_NO_TARGET) {
         aim(S5_CENTRE_ANGLE);
         unsigned forward=read_at(S5_CENTRE_INDEX,FALSE,true,S5_UNKNOWN_RANGE);
-        if (!s5_range_available(forward) || forward <= S5_CLEAR_MM) return FALSE;
+        if (!s5_range_available(forward) || forward <= limit_mm) return FALSE;
         if(request) {
             vehicle_submit_obstacle_range(forward);
             if(forward==S5_OPEN_RANGE)vehicle_submit_obstacle_range(forward);
@@ -185,7 +185,7 @@ static BOOL scan_obstacle(S5_PROFILE *profile, BOOL verbose, const uint32_t *req
         tm_printf((UB*)"%s fine scan starting at %u deg\n", tag, s5_scan_bearing(anchor));
     unsigned fine = anchor == S5_CENTRE_INDEX && s5_range_available(centre) ?
                     centre : read_at(anchor, verbose, true, S5_UNKNOWN_RANGE);
-    if (!s5_same_obstacle(fine, coarse) || fine > S5_CLEAR_MM) {
+    if (!s5_same_obstacle(fine, coarse) || fine > limit_mm) {
         tm_printf((UB*)"%s fine scan could not confirm the %u mm target at %u deg\n",
                   tag, coarse, servo_angle);
         goto cancelled;
@@ -292,7 +292,7 @@ static void scan_task(INT stacd, void *exinf)
     (void)exinf;
     if (!setup()) return;
     tm_printf((UB*)"[S5] GP16 trigger, GP17 echo. Entry=%u mm, clear=%u mm\n",
-              S5_SCAN_STOP_MM, S5_CLEAR_MM);
+              S5_FOLLOW_STOP_MM, S5_FOLLOW_CLEAR_MM);
 
     for (;;) {
         S5_PING ping = s5_hw_ping();
@@ -303,13 +303,14 @@ static void scan_task(INT stacd, void *exinf)
 
         uint32_t request;
         S5_SIDE check_side;
-        if (wake == E_OK && vehicle_obstacle_scan_request(&request, &check_side)) {
+        unsigned limit_mm;
+        if (wake == E_OK && vehicle_obstacle_scan_request(&request, &check_side, &limit_mm)) {
             if (check_side != S5_NO_SIDE) {
                 unsigned clearance = check_return_path(check_side, request);
                 vehicle_finish_obstacle_return_check(clearance, request);
             } else {
                 S5_PROFILE profile;
-                BOOL scanned = scan_obstacle(&profile, FALSE, &request);
+                BOOL scanned = scan_obstacle(&profile, FALSE, &request, limit_mm);
                 vehicle_finish_obstacle_scan(scanned ? &profile : NULL, request);
             }
             /* The sweep finishes with a forward ping. */
@@ -419,7 +420,7 @@ static void bench_task(INT stacd,void *exinf)
         unsigned detected = bench_wait_for_echo(TRUE);
         tm_printf((UB*)"[S5 BENCH] obstacle detected at %u mm. Starting scan and turn planning.\n", detected);
         S5_PROFILE profile;
-        if (scan_obstacle(&profile, TRUE, NULL))
+        if (scan_obstacle(&profile, TRUE, NULL, S5_CLEAR_MM))
             bench_print_plan(&profile);
         else
             tm_printf((UB*)"[S5 BENCH] plan=STOP turn=0 deg. Profile unavailable.\n");
