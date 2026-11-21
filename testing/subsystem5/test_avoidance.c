@@ -759,18 +759,15 @@ static void test_rounded_bypass(bool left)
     end_move(&model, &in, &out);
     in.avoidance.line_hit = true;
     in.avoidance.line_centered = false;
+    in.avoidance.left_on_tape = !left;
+    in.avoidance.right_on_tape = left;
     in.avoidance.line_at = in.avoidance.now + 260;
     step(&model, &in, &out, 260);
-    assert(model.state == VC_RECOVER_LINE && model.avoidance.line_samples == 0);
-    in.avoidance.line_hit = false;
-    in.avoidance.line_centered = true;
-    in.avoidance.line_at = in.avoidance.now + 20;
-    step(&model, &in, &out, 20);
     step(&model, &in, &out, 20);
     assert(model.state == VC_RECOVER_LINE && model.avoidance.line_samples == 1);
     in.avoidance.line_at = in.avoidance.now + 20;
     step(&model, &in, &out, 20);
-    assert(model.state == VC_FOLLOW_LINE);
+    assert(model.state == VC_FOLLOW_LINE && model.await_forward_range);
 }
 
 static void test_blank_floor_after_alignment_stops(void)

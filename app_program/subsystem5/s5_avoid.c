@@ -298,8 +298,10 @@ static S5_AVOID_OUTPUT execute_route(S5_AVOID *state, const S5_AVOID_INPUT *in)
     if (phase == S5_CHECK_LINE) {
         if (!settled) return wait;
         if (in->line_junction) return fail(state, S5_FAIL_LINE, in->now);
-        /* The measured crossing supplies tape evidence while the outer sensors straddle it. */
-        observe_line(state, in, tape_edges_confirmed(state) && in->line_centered,
+        /* After a measured crossing, the line follower can correct a tape
+           edge that is still under one outer sensor after the final arc. */
+        bool at_tracking_position = in->line_centered || (in->left_on_tape != in->right_on_tape);
+        observe_line(state, in, tape_edges_confirmed(state) && at_tracking_position,
                      state->phase_at + MOTION_SETTLE_MS);
         return state->line_samples >= 2 ? go(state, S5_COMPLETE, in->now) : wait;
     }
