@@ -1,5 +1,6 @@
 #include "motion_core.h"
 #include "motion_config.h"
+#include "motion_crawl.h"
 #include "motion_hw.h"
 
 enum { IDLE, VELOCITY, DISTANCE, TURN };
@@ -34,6 +35,8 @@ static struct wheel_data {
 static uint64_t last_tick, command_start;
 static uint32_t timing_fault_gap_us; /* Diagnostic only; latched until explicit clear. */
 static uint64_t stall_start[2];
+static S2_CRAWL crawl;
+static bool crawling;
 static unsigned cpr(unsigned w) { return w ? RIGHT_CPR_X10 : LEFT_CPR_X10; }
 static int clamp(int v, int lo, int hi) { return v<lo?lo:(v>hi?hi:v); }
 void subsystem2_encoder_gpio_irq(unsigned gpio, uint32_t events)
@@ -59,7 +62,7 @@ static uint16_t drain_encoder(void)
     EI(saved);
     return result;
 }
-static void drive(unsigned w, unsigned percent)
+static void drive_ticks(unsigned w, unsigned ticks)
 {
     unsigned a=w?RIGHT_IN_A:LEFT_IN_A, b=w?RIGHT_IN_B:LEFT_IN_B;
     bool reverse=w?state.right_reverse:state.left_reverse;
@@ -67,8 +70,12 @@ static void drive(unsigned w, unsigned percent)
     /* Clear both before selecting the active input. Zero duty = coast. */
     s2_hw_pwm_write(a,0);
     s2_hw_pwm_write(b,0);
-    if (percent) s2_hw_pwm_write(reverse?b:a, (uint16_t)(percent*10u));
-    wheels[w].duty=percent;
+    if (ticks) s2_hw_pwm_write(reverse?b:a, (uint16_t)ticks);
+    wheels[w].duty=(ticks+5u)/10u;
+}
+static void drive(unsigned w, unsigned percent)
+{
+    drive_ticks(w,percent*10u);
 }
 /* Robo Pico vendor demo uses throttle=0 (both inputs high) for braking.
  * Apply only to a zero-target wheel during forward velocity steering.
@@ -90,6 +97,7 @@ void s2_core_stop(void)
 {
     drive(0,0); drive(1,0);
     state.mode=IDLE;
+    crawling=false;
     for(unsigned i=0;i<2;i++) {
         wheels[i].integral=0;
         wheels[i].previous_error=0;
@@ -225,11 +233,23 @@ void s2_core_service(void)
         fail(FAULT_TIMING); return;
     }
     if(moving && state.mode!=VELOCITY && now-command_start>MOVE_TIMEOUT_US) { fail(FAULT_TIMEOUT); return; }
+    bool slow_forward=state.mode==VELOCITY && !state.left_reverse && !state.right_reverse &&
+                      state.left_rpm<=S2_CRAWL_MAX_RPM && state.right_rpm<=S2_CRAWL_MAX_RPM;
+    if(slow_forward && !crawling) { crawl=(S2_CRAWL){0}; }
+    crawling=slow_forward;
+    uint32_t crawl_rpm[2]={0};
+    if(crawling) { s2_crawl_sample(&crawl,(uint16_t)elapsed,sample,crawl_rpm); }
+    bool match_wheels=crawling && state.left_rpm==state.right_rpm && state.left_rpm!=0u;
+
     for(unsigned w=0;w<2;w++) {
         unsigned n=(sample>>(w?5:0))&31u;
         unsigned rpm=(unsigned)((uint64_t)n*600000000u/(cpr(w)*elapsed));
         if(rpm>300 && moving) { fail(FAULT_COUNTS); return; }
-        wheels[w].rpm=(3u*wheels[w].rpm+(rpm>300?300:rpm)+2u)/4u;
+        if(crawling) {
+            wheels[w].rpm=(crawl_rpm[w]+S2_RPM_SCALE/2u)/S2_RPM_SCALE;
+        } else {
+            wheels[w].rpm=(3u*wheels[w].rpm+(rpm>300?300:rpm)+2u)/4u;
+        }
         if(!moving) continue;
         if(state.mode==DISTANCE || state.mode==TURN) {
             unsigned p=wheels[w].progress+n;
@@ -248,11 +268,12 @@ void s2_core_service(void)
         }
         /* Reduce speed near a distance/turn target; coast overshoot still needs calibration. */
         if(state.mode!=VELOCITY && wheels[w].target-wheels[w].progress<80 && target>60) target=60;
-        unsigned duty=pid(w,target);
-        if(n || duty<20) stall_start[w]=now;
+        unsigned ticks=crawling ? s2_crawl_duty(&crawl,w,target,crawl_rpm,match_wheels)
+                                : 10u*pid(w,target);
+        if(n || ticks<200u) stall_start[w]=now;
         if(!stall_start[w]) stall_start[w]=now;
         if(now-stall_start[w]>STALL_US) { fail(FAULT_STALL); return; }
-        drive(w,duty);
+        drive_ticks(w,ticks);
     }
     if(moving && state.mode!=VELOCITY &&
        wheels[0].progress>=wheels[0].target && wheels[1].progress>=wheels[1].target) s2_core_stop();

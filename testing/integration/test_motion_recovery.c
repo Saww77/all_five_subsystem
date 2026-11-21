@@ -20,6 +20,28 @@ static void check_steering(void)
     assert(state.curve_side == 0);
 }
 
+static void check_steering_reversal(void)
+{
+    LF_STATE state = {0};
+    LF_CMD out;
+
+    for (unsigned i = 0; i < 12u; ++i) {
+        line_decide(130, 0, 475, &state, &out);
+    }
+    assert(out.left > out.right);
+    unsigned straight = 0;
+    for (unsigned i = 0; i < 30u; ++i) {
+        line_decide(380, 0, 130, &state, &out);
+        if (out.left == out.right) {
+            ++straight;
+        } else if (out.left < out.right) {
+            assert(straight >= 8u);
+            return;
+        }
+    }
+    assert(0 && "persistent error must still steer after the neutral interval");
+}
+
 static void check_curve(int side)
 {
     LF_STATE state = {0};
@@ -59,7 +81,7 @@ static void check_line_drop(void)
     LF_STATE state = {0};
     LF_CMD out;
 
-    for (unsigned sample = 0; sample < 4u; ++sample) {
+    for (unsigned sample = 0; sample < 10u; ++sample) {
         line_decide(80, 600, 950, &state, &out);
     }
     assert(state.curve_side == 1);
@@ -129,6 +151,7 @@ static void check_start_stop(void)
 int main(void)
 {
     check_steering();
+    check_steering_reversal();
     check_curve(-1);
     check_curve(1);
     check_line_drop();

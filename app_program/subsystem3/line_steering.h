@@ -15,10 +15,12 @@ typedef struct {
     int8_t correction_rpm;
     int8_t candidate_side;
     int8_t curve_side;
+    int8_t last_steer_side;
     uint8_t candidate_samples;
     uint8_t strong_samples;
     uint8_t light_samples;
     uint8_t centered_samples;
+    uint8_t neutral_samples;
     bool slew_hold;
 } LF_STATE;
 

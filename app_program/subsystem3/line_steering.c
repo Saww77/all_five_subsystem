@@ -2,15 +2,16 @@
 
 #define EDGE_DARKNESS 160
 #define WIDE_MARKING_DARKNESS 800
-#define STRAIGHT_ENTER 165
-#define STRAIGHT_RELEASE 80
+#define STRAIGHT_ENTER 205
+#define STRAIGHT_RELEASE 110
 #define CURVE_DARKNESS 350
 #define CURVE_IMBALANCE 315
-#define CURVE_CONFIRM_SAMPLES 3
-#define CURVE_HOLD_SAMPLES 10
+#define CURVE_CONFIRM_SAMPLES 8
+#define CURVE_HOLD_SAMPLES 14
 #define CURVE_TIGHT_SAMPLES 24
 #define CURVE_RECENTER_SAMPLES 2
 #define SHORT_GAP_SAMPLES 10
+#define NEUTRAL_SAMPLES 8
 
 static int absolute(int value)
 {
@@ -56,7 +57,7 @@ static int track_demand(LF_STATE *state, int error, bool light)
         (previous * side < STRAIGHT_ENTER || error * side < STRAIGHT_RELEASE)) {
         return 0;
     }
-    return side * (magnitude >= 320 ? 4 : 2);
+    return side * S3_CORRECTION_STEP_RPM;
 }
 
 static int curve_demand(LF_STATE *state, int error, int strong_side, bool light)
@@ -124,12 +125,21 @@ void line_decide(int left, int center, int right, LF_STATE *state, LF_CMD *comma
         return;
     }
 
+    if (demand * state->last_steer_side < 0 && state->neutral_samples < NEUTRAL_SAMPLES) {
+        demand = 0;
+    }
     if (state->slew_hold) {
         state->slew_hold = false;
     } else if (demand != state->correction_rpm) {
         state->correction_rpm += demand > state->correction_rpm
                                ? S3_CORRECTION_STEP_RPM : -S3_CORRECTION_STEP_RPM;
         state->slew_hold = true;
+    }
+    if (state->correction_rpm != 0) {
+        state->last_steer_side = state->correction_rpm < 0 ? -1 : 1;
+        state->neutral_samples = 0;
+    } else if (state->neutral_samples < NEUTRAL_SAMPLES) {
+        ++state->neutral_samples;
     }
     int left_rpm = S3_CRUISE_RPM + state->correction_rpm;
     int right_rpm = S3_CRUISE_RPM - state->correction_rpm;
