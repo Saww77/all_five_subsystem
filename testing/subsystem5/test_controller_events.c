@@ -340,14 +340,14 @@ int main(void)
     complete_move();
 
     settle_step();
-    assert(model.avoidance.phase == S5_FIND_LINE && (queued_command >> 4) == 168);
+    assert(model.avoidance.phase == S5_FIND_LINE && (queued_command >> 4) == 168 + S5_SEARCH_EXTENSION_MM);
     motor_acknowledge(S2_REPLY_OK);
     work();
     near_tape = true;
     search_progress = 100;
     for (unsigned i = 0; i < 2; ++i) {
         clock_ms += 10;
-        vehicle_submit_line(850, 0, 26, 30, 30, FALSE, 0);
+        vehicle_submit_line(200, 0, 26, 30, 30, FALSE, 0);
         work();
     }
     assert(model.avoidance.phase == S5_FIND_LINE && motor_busy);
@@ -355,7 +355,7 @@ int main(void)
     search_progress = 130;
     for (unsigned i = 0; i < 2; ++i) {
         clock_ms += 10;
-        vehicle_submit_line(108, 0, 850, 30, 30, FALSE, 0);
+        vehicle_submit_line(108, 0, 200, 30, 30, FALSE, 0);
         work();
     }
     assert(model.avoidance.phase == S5_CENTER_LINE && !queued_command);

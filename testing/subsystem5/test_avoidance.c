@@ -129,7 +129,7 @@ static void tape_sample(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out,
 
 static void cross_tape_and_center(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out)
 {
-    unsigned nominal = model->avoidance.search_mm - S5_SEARCH_MARGIN_MM;
+    unsigned nominal = model->avoidance.search_mm - S5_SEARCH_MARGIN_MM - S5_SEARCH_EXTENSION_MM;
     start_move(model, in, out, S5_ADVANCE, model->avoidance.search_mm);
 
     tape_sample(model, in, out, nominal - 35, true, false);
@@ -359,6 +359,34 @@ static void test_rounded_turn_stays_bounded(void)
     S5_AVOID_INPUT in = {.motion = S5_MOTION_PENDING, .now = 9000};
     assert(s5_avoid_step(&state, &in).action == S5_STOP);
     assert(state.phase == S5_FAILED && state.failure == S5_FAIL_PHASE_TIMEOUT);
+
+    state = (S5_AVOID){.phase = S5_PASS, .pass_mm = 510};
+    in.now = 15000;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_PASS);
+    in.now = 24000;
+    assert(s5_avoid_step(&state, &in).action == S5_STOP && state.failure == S5_FAIL_PHASE_TIMEOUT);
+}
+
+static void test_tape_beyond_original_search_limit(void)
+{
+    VC_MODEL model = {.state = VC_RECOVER_LINE, .avoidance = {
+        .phase = S5_FIND_LINE, .side = S5_RIGHT, .search_mm = 184 + S5_SEARCH_EXTENSION_MM,
+    }};
+    VC_INPUT in = track_input();
+    VC_OUTPUT out;
+    in.avoidance.range_valid = false;
+    in.avoidance.near_original_line = true;
+    start_move(&model, &in, &out, S5_ADVANCE, 244);
+    tape_sample(&model, &in, &out, 184, false, false);
+    assert(model.avoidance.phase == S5_FIND_LINE && !out.stop);
+
+    /* Verify the same stripe if the physical far sensor happens to hit first. */
+    tape_sample(&model, &in, &out, 192, false, true);
+    tape_sample(&model, &in, &out, 193, false, true);
+    assert(model.avoidance.phase == S5_FIND_LINE && !out.stop);
+    tape_sample(&model, &in, &out, 220, true, false);
+    tape_sample(&model, &in, &out, 221, true, false);
+    assert(out.stop && model.avoidance.phase == S5_CENTER_LINE && model.avoidance.align_at_mm == 219);
 }
 
 static void test_clipped_hold_ignores_interleaved_forward_outliers(void)
@@ -753,7 +781,7 @@ static void test_rounded_bypass(bool left)
     in.avoidance.range_valid = false;
     start_move(&model, &in, &out, inward, 0);
     end_move(&model, &in, &out);
-    assert(model.avoidance.search_mm == 237);
+    assert(model.avoidance.search_mm == 237 + S5_SEARCH_EXTENSION_MM);
     cross_tape_and_center(&model, &in, &out);
     start_move(&model, &in, &out, outward, 0);
     end_move(&model, &in, &out);
@@ -870,6 +898,7 @@ int main(void)
     test_reentry_limit();
     test_complete_profile_commits_without_another_echo();
     test_rounded_turn_stays_bounded();
+    test_tape_beyond_original_search_limit();
     test_clipped_hold_ignores_interleaved_forward_outliers();
     test_width_and_side_clearance();
     test_centered_and_offset_boxes();

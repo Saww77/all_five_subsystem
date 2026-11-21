@@ -3,12 +3,17 @@
 #include "motion_crawl.h"
 #include "motion_hw.h"
 #include "motion_transport.h"
+#include "../subsystem3/line_steering.h"
 
 #define WHEEL_CIRCUMFERENCE_UM ((uint32_t)((uint64_t)WHEEL_DIAMETER_MM*3141593u/1000u))
-#define S5_MANEUVER_RPM 24u
-#define ARC_OUTSIDE_RPM 32u
+#define MANEUVER_PIVOT_RPM 24u
+#define ARC_DIAMETER_MM (2u * S2_ARC_RADIUS_MM)
+#define ARC_INNER_RPM ((S3_CRUISE_RPM * (ARC_DIAMETER_MM - EFFECTIVE_TRACK_MM) + S2_ARC_RADIUS_MM) / ARC_DIAMETER_MM)
+#define ARC_OUTSIDE_RPM (2u * S3_CRUISE_RPM - ARC_INNER_RPM)
 
-_Static_assert(S2_ARC_RADIUS_MM * 2u > EFFECTIVE_TRACK_MM, "Both wheels must roll forward on a detour arc");
+_Static_assert(ARC_DIAMETER_MM > EFFECTIVE_TRACK_MM, "Both wheels must roll forward on a detour arc");
+_Static_assert(S3_CRUISE_RPM <= S2_CRAWL_MAX_RPM && ARC_INNER_RPM > 3u,
+               "Crawl speed must leave room for arc wheel trim");
 
 enum { IDLE, VELOCITY, DISTANCE, TURN };
 enum { FAULT_COUNTS=1, FAULT_TIMING=2, FAULT_STALL=4, FAULT_TIMEOUT=8 };
@@ -220,7 +225,7 @@ bool s2_core_maneuver(unsigned arg)
         accepted=mm && mm<=MAX_DISTANCE_MM && move_mm(mm,reverse);
     }
     state.level=level;
-    if(accepted)state.left_rpm=state.right_rpm=S5_MANEUVER_RPM;
+    if(accepted)state.left_rpm=state.right_rpm=state.mode==DISTANCE?S3_CRUISE_RPM:MANEUVER_PIVOT_RPM;
     return accepted;
 }
 
@@ -240,12 +245,9 @@ bool s2_core_arc(bool right)
     bool accepted=start(TURN,false,false,arc_counts(!right,0),arc_counts(right,1));
     state.level=level;
     if(!accepted)return false;
-    unsigned inner=(ARC_OUTSIDE_RPM*(2u*S2_ARC_RADIUS_MM-EFFECTIVE_TRACK_MM)+
-                    S2_ARC_RADIUS_MM+EFFECTIVE_TRACK_MM/2u)/
-                   (2u*S2_ARC_RADIUS_MM+EFFECTIVE_TRACK_MM);
     state.arc=true;
-    state.left_rpm=right?ARC_OUTSIDE_RPM:inner;
-    state.right_rpm=right?inner:ARC_OUTSIDE_RPM;
+    state.left_rpm=right?ARC_OUTSIDE_RPM:ARC_INNER_RPM;
+    state.right_rpm=right?ARC_INNER_RPM:ARC_OUTSIDE_RPM;
     return true;
 }
 
@@ -313,14 +315,17 @@ void s2_core_service(void)
         fail(FAULT_TIMING); return;
     }
     if(moving && state.mode!=VELOCITY && now-command_start>MOVE_TIMEOUT_US) { fail(FAULT_TIMEOUT); return; }
-    bool slow_forward=state.mode==VELOCITY && !state.left_reverse && !state.right_reverse &&
-                      state.left_rpm<=S2_CRAWL_MAX_RPM && state.right_rpm<=S2_CRAWL_MAX_RPM;
-    bool low_speed=slow_forward || state.arc;
+    bool slow_targets=state.left_rpm<=S2_CRAWL_MAX_RPM && state.right_rpm<=S2_CRAWL_MAX_RPM;
+    bool slow_forward=slow_targets && state.mode==VELOCITY && !state.left_reverse && !state.right_reverse;
+    bool slow_distance=slow_targets && state.mode==DISTANCE;
+    bool low_speed=slow_forward || slow_distance || state.arc;
     if(low_speed && !crawling) { crawl=(S2_CRAWL){0}; }
     crawling=low_speed;
     uint32_t crawl_rpm[2]={0};
     if(crawling) { s2_crawl_sample(&crawl,(uint16_t)elapsed,sample,crawl_rpm); }
-    bool match_wheels=slow_forward && state.left_rpm==state.right_rpm && state.left_rpm!=0u;
+    bool both_driving=slow_forward || (slow_distance && wheels[0].progress<wheels[0].target &&
+                                      wheels[1].progress<wheels[1].target);
+    bool match_wheels=both_driving && state.left_rpm==state.right_rpm && state.left_rpm!=0u;
     int arc_trim=0;
     if(state.arc) {
         /* Correct the fraction of each wheel's arc completed. This keeps the

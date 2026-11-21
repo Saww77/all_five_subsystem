@@ -1,6 +1,5 @@
 #include "line_steering.h"
 
-#define EDGE_DARKNESS 160
 #define WIDE_MARKING_DARKNESS 800
 #define STRAIGHT_ENTER 205
 #define STRAIGHT_RELEASE 110
@@ -115,7 +114,7 @@ void line_decide(int left, int center, int right, LF_STATE *state, LF_CMD *comma
     int demand = 0;
     int error = right - left;
     int peak = left > right ? left : right;
-    bool light = peak < EDGE_DARKNESS;
+    bool light = peak < S3_EDGE_DARKNESS;
     int strong_side = 0;
     if (state->settle_samples > 0u) { --state->settle_samples; }
 

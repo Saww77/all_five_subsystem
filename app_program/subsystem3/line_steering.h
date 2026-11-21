@@ -6,6 +6,7 @@
 
 /* Wheel targets use the team's even-RPM Subsystem 2 API. */
 #define S3_CRUISE_RPM 10
+#define S3_EDGE_DARKNESS 160
 #define S3_MAX_OUTER_RPM 12
 #define S3_CORRECTION_STEP_RPM 2
 #define S3_BLIND_CURVE_LIMIT 160u /* 1.6 s at one sample every 10 ms */

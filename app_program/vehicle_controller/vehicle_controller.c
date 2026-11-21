@@ -5,6 +5,7 @@
 #include "../subsystem2/motion_transport.h"
 #include "../subsystem1/s1_comm.h"
 #include "../subsystem3/subsystem3.h"
+#include "../subsystem3/line_steering.h"
 #include "../subsystem5/subsystem5.h"
 #ifndef VC_AUTO_START
 #if TM_MQTT
@@ -20,7 +21,7 @@
 #define VC_RETRACE_MIN_MS 1800u
 #define VC_RETRACE_LONG_MS 3600u
 #define S5_LINE_DARK 420
-#define S5_RECOVERY_LINE_DARK 250
+#define S5_CENTER_TAPE_DARK 250
 #define S5_WIDE_MARKING 750
 #define VC_WAKE 1u
 
@@ -38,6 +39,7 @@ static uint32_t reset_started, reset_refreshed;
 static S5_RANGE_GATE obstacle_range;
 static uint32_t obstacle_range_at, full_profile_at, scan_request_id;
 static S5_PROFILE full_profile;
+static struct { unsigned left:10, center:10, right:10; } tape_search_peak;
 static struct {
     uint32_t sequence, issued_at, refreshed;
     uint16_t command;
@@ -47,7 +49,7 @@ static struct {
 static bool line_hit(void)
 {
     S5_PHASE phase = model.avoidance.phase;
-    unsigned darkness = phase == S5_FIND_LINE || phase == S5_CHECK_LINE ? S5_RECOVERY_LINE_DARK : S5_LINE_DARK;
+    unsigned darkness = phase == S5_FIND_LINE || phase == S5_CHECK_LINE ? S3_EDGE_DARKNESS : S5_LINE_DARK;
     return data.l >= darkness || data.r >= darkness;
 }
 static bool range_valid(uint32_t now)
@@ -157,9 +159,9 @@ static VC_INPUT controller_input(BOOL ready, BOOL linked, unsigned faults, bool 
             .profile = full_profile, .profile_valid = pending.profile_valid,
             .retry_scan = pending.start,
             .line_at = data.line_timestamp_ms, .line_hit = line_hit(),
-            .left_on_tape = data.l >= S5_RECOVERY_LINE_DARK,
-            .right_on_tape = data.r >= S5_RECOVERY_LINE_DARK,
-            .line_center_seen = data.c >= S5_RECOVERY_LINE_DARK,
+            .left_on_tape = data.l >= S3_EDGE_DARKNESS,
+            .right_on_tape = data.r >= S3_EDGE_DARKNESS,
+            .line_center_seen = data.c >= S5_CENTER_TAPE_DARK,
             .line_junction = data.l >= S5_WIDE_MARKING && data.r >= S5_WIDE_MARKING,
             .sensor_to_axle_mm = S5_IR_TO_AXLE_MM,
         },
@@ -463,6 +465,11 @@ static TMO vehicle_service_once(void)
             unsigned progress = s2_core_distance_travelled_mm(&status);
             in.avoidance.search_progress_mm = progress <= S5_MAX_LEG_MM ? progress : S5_MAX_LEG_MM;
         }
+        if (line_fresh && (distance_command || in.avoidance.near_original_line)) {
+            if (data.l > tape_search_peak.left) tape_search_peak.left = data.l;
+            if (data.c > tape_search_peak.center) tape_search_peak.center = data.c;
+            if (data.r > tape_search_peak.right) tape_search_peak.right = data.r;
+        }
     } else if (model.avoidance.phase == S5_CENTER_LINE && in.avoidance.motion == S5_MOTION_NONE) {
         /* STOP preserves the search command's encoder counts until another move starts. */
         unsigned progress = s2_core_distance_travelled_mm(&status);
@@ -515,6 +522,12 @@ static TMO vehicle_service_once(void)
     unsigned left_entry = model.avoidance.left_edge.entry_mm;
     unsigned right_entry = model.avoidance.right_edge.entry_mm;
     unsigned align_at = model.avoidance.align_at_mm;
+    unsigned search_progress = model.avoidance.search_progress_mm;
+    unsigned search_limit = model.avoidance.search_mm;
+    unsigned left_samples = model.avoidance.left_edge.samples;
+    unsigned right_samples = model.avoidance.right_edge.samples;
+    if (phase == S5_FIND_LINE && phase != previous)
+        tape_search_peak = (__typeof__(tape_search_peak)){0};
     bool executing = s5_avoid_executing(phase);
     if (executing && !was_executing) {
         /* The next forward range must be from the new heading after rejoining. */
@@ -583,6 +596,10 @@ static TMO vehicle_service_once(void)
                       avoidance_phase_name[previous], failure, reason,
                       in.avoidance.range_valid ? (unsigned)in.avoidance.range_mm : S5_UNKNOWN_RANGE,
                       last_echo, in.motor_faults, s2_get_bits(&status,41,13), s2_get_bits(&status,54,13));
+        if (previous == S5_FIND_LINE && failure == S5_FAIL_LINE)
+            tm_printf((UB*)"[S5] tape search %u/%u mm, edge samples left=%u right=%u, IR peak L/C/R=%u/%u/%u\n",
+                      search_progress, search_limit, left_samples, right_samples,
+                      tape_search_peak.left, tape_search_peak.center, tape_search_peak.right);
     }
     return delay;
 }

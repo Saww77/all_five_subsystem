@@ -1,5 +1,6 @@
 #include "s5_avoid.h"
 #include "../subsystem2/motion_config.h"
+#include "../subsystem3/line_steering.h"
 
 #define FRONT_MARGIN_MM 15u
 #define MAX_LATERAL_OFFSET_MM 400u
@@ -8,7 +9,7 @@
 #define RESCAN_INTERVAL_MS 1000u
 #define RESCAN_RANGE_CHANGE_MM 30u
 #define PHASE_TIMEOUT_MS 9000u
-#define LONG_MOVE_TIMEOUT_MS 15000u
+#define WHEEL_CIRCUMFERENCE_MM (WHEEL_DIAMETER_MM * 3141u / 1000u)
 #define ARC_FORWARD_MM ((S2_ARC_RADIUS_MM * 866u + 999u) / 1000u)
 #define ARC_SIDEWAYS_MM (S2_ARC_RADIUS_MM / 2u)
 #define ARC_ENTRY_MM (ARC_FORWARD_MM + S5_TURN_CLEARANCE_MM)
@@ -28,7 +29,7 @@ _Static_assert(S5_MAX_PASS_MM < 1024u, "Total pass distance must fit the 10-bit 
 _Static_assert(S5_CHASSIS_WIDTH_MM >= EFFECTIVE_TRACK_MM, "Include the outer wheel edges in chassis width");
 _Static_assert(MAX_LATERAL_OFFSET_MM <= 511u, "Lateral offset must fit in 9 bits");
 _Static_assert(((MAX_LATERAL_OFFSET_MM - ARC_SIDEWAYS_MM) * 1000u + 865u) / 866u +
-                   S5_SEARCH_MARGIN_MM <= S5_MAX_LEG_MM && S5_MAX_LEG_MM <= 1023u,
+                   S5_SEARCH_MARGIN_MM + S5_SEARCH_EXTENSION_MM <= S5_MAX_LEG_MM && S5_MAX_LEG_MM <= 1023u,
                "Rounded search distance must fit the bounded encoder command");
 
 static bool at_or_after(uint32_t time, uint32_t reference)
@@ -241,15 +242,17 @@ static S5_AVOID_OUTPUT find_tape(S5_AVOID *state, const S5_AVOID_INPUT *in, bool
     }
 
     if (tape_edges_confirmed(state)) {
-        unsigned near = state->side == S5_LEFT ? state->right_edge.entry_mm : state->left_edge.entry_mm;
-        unsigned far = state->side == S5_LEFT ? state->left_edge.entry_mm : state->right_edge.entry_mm;
-        /* The sensor nearer the tape must cross first on the 60-degree approach. */
-        if (far <= near || far - near > diagonal_distance_mm(S5_CHASSIS_WIDTH_MM / 2u))
+        unsigned left = state->left_edge.entry_mm;
+        unsigned right = state->right_edge.entry_mm;
+        unsigned separation = left > right ? left - right : right - left;
+        /* The mounting can shift which sensor crosses first. The mean still
+           locates the stripe when the two observations are distinct and close. */
+        if (!separation || separation > diagonal_distance_mm(S5_CHASSIS_WIDTH_MM / 2u))
             return fail(state, S5_FAIL_LINE, in->now);
         /* Averaging the entries cancels the side offsets of the front sensors.
            Move from the leading edge to the stripe centre, compensate for the
            sensor-to-axle distance, and reserve the final arc's lateral travel. */
-        unsigned stripe_center_mm = (near + far + 1u) / 2u +
+        unsigned stripe_center_mm = (left + right + 1u) / 2u +
                                     diagonal_distance_mm((S5_TAPE_WIDTH_MM + 1u) / 2u);
         int turn_start_mm = (int)(stripe_center_mm + in->sensor_to_axle_mm) -
                             (int)diagonal_distance_mm(ARC_SIDEWAYS_MM);
@@ -288,8 +291,12 @@ static S5_AVOID_OUTPUT execute_route(S5_AVOID *state, const S5_AVOID_INPUT *in)
     S5_PHASE phase = state->phase;
     uint32_t elapsed = in->now - state->phase_at;
     bool settled = in->stopped && elapsed >= MOTION_SETTLE_MS;
-    unsigned timeout = phase == S5_PASS && state->pass_mm > MAX_LATERAL_OFFSET_MM + S5_SEARCH_MARGIN_MM ?
-                       LONG_MOVE_TIMEOUT_MS : PHASE_TIMEOUT_MS;
+    unsigned travel = 0;
+    if (phase == S5_SHIFT_OUT) travel = state->diagonal_mm;
+    else if (phase == S5_PASS) travel = state->pass_mm;
+    else if (phase == S5_FIND_LINE) travel = state->search_mm;
+    /* Allow nominal travel at line-follow speed plus time to settle and accelerate. */
+    unsigned timeout = PHASE_TIMEOUT_MS + travel * 60000u / (S3_CRUISE_RPM * WHEEL_CIRCUMFERENCE_MM);
     S5_AVOID_OUTPUT wait = {.action = S5_WAIT};
     if (elapsed >= timeout)
         return fail(state, phase == S5_CHECK_LINE || phase == S5_FIND_LINE || phase == S5_CENTER_LINE ?
@@ -426,7 +433,7 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
             state->offset_mm = offset;
             state->diagonal_mm = diagonal;
             state->pass_mm = pass > forward_credit ? pass - forward_credit : 0u;
-            state->search_mm = return_diagonal + S5_SEARCH_MARGIN_MM;
+            state->search_mm = return_diagonal + S5_SEARCH_MARGIN_MM + S5_SEARCH_EXTENSION_MM;
             state->search_after_mm = s5_reentry_detection_mm(return_diagonal, in->sensor_to_axle_mm);
             return go(state, S5_TURN_OUT, in->now);
         }
