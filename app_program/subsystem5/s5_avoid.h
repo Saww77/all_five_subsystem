@@ -24,9 +24,11 @@
 #define S5_SIDE_GAP_MM 40u
 #define S5_SIDE_ALLOWANCE_MM ((S5_CHASSIS_WIDTH_MM + 1u) / 2u + S5_SIDE_GAP_MM)
 #ifndef S5_IR_TO_AXLE_MM
-#define S5_IR_TO_AXLE_MM 60u
+#define S5_IR_TO_AXLE_MM 130u
 #endif
-#define S5_MIN_SIDE_SHIFT_MM (S5_IR_TO_AXLE_MM + 15u)
+#ifndef S5_OUTER_IR_SPACING_MM
+#define S5_OUTER_IR_SPACING_MM 30u
+#endif
 #define S5_UNCERTAIN_EDGE_MM 25u
 #define S5_REVERSE_MM 30u
 #define S5_LONG_REVERSE_MM 60u
@@ -61,7 +63,6 @@ typedef struct {
     uint32_t now, range_at, profile_at, line_at;
     S5_PROFILE profile;
     unsigned range_mm : 12;
-    unsigned sensor_to_axle_mm : 9;
     unsigned search_progress_mm : 10;
     unsigned motion : 3;
     bool stopped : 1, range_valid : 1, profile_valid : 1;
@@ -95,7 +96,6 @@ typedef struct {
 S5_BYPASS s5_plan_bypass(const S5_PROFILE *profile);
 unsigned s5_scan_range_limit(const S5_AVOID *state);
 unsigned s5_planned_pass_mm(const S5_PROFILE *profile, unsigned forward_mm);
-unsigned s5_reentry_detection_mm(unsigned offset_mm, unsigned sensor_to_axle_mm);
 bool s5_avoid_executing(S5_PHASE phase);
 void s5_avoid_begin(S5_AVOID *state, uint32_t now);
 void s5_avoid_abort(S5_AVOID *state, S5_FAILURE reason, uint32_t now);

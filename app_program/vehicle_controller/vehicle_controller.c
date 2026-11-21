@@ -25,7 +25,6 @@
 #define S5_WIDE_MARKING 750
 #define VC_WAKE 1u
 
-_Static_assert(S5_IR_TO_AXLE_MM > 0 && S5_IR_TO_AXLE_MM < 512u, "Axle offset must fit in 9 bits");
 enum { SCAN_OFF, SCAN_READY, SCAN_ACTIVE };
 static ID guard, work_event;
 static VEHICLE_SNAPSHOT data;
@@ -163,7 +162,6 @@ static VC_INPUT controller_input(BOOL ready, BOOL linked, unsigned faults, bool 
             .right_on_tape = data.r >= S3_EDGE_DARKNESS,
             .line_center_seen = data.c >= S5_CENTER_TAPE_DARK,
             .line_junction = data.l >= S5_WIDE_MARKING && data.r >= S5_WIDE_MARKING,
-            .sensor_to_axle_mm = S5_IR_TO_AXLE_MM,
         },
     };
 }
@@ -459,13 +457,13 @@ static TMO vehicle_service_once(void)
     if (model.avoidance.phase == S5_FIND_LINE) {
         unsigned min_cross_mm = model.avoidance.search_after_mm;
         bool distance_command = in.avoidance.motion == S5_MOTION_PENDING || in.avoidance.motion == S5_MOTION_DONE;
-        in.avoidance.near_original_line = !min_cross_mm ||
-              (distance_command && s2_core_distance_reached(min_cross_mm, &status));
+        in.avoidance.near_original_line = distance_command &&
+              (!min_cross_mm || s2_core_distance_reached(min_cross_mm, &status));
         if (distance_command) {
             unsigned progress = s2_core_distance_travelled_mm(&status);
             in.avoidance.search_progress_mm = progress <= S5_MAX_LEG_MM ? progress : S5_MAX_LEG_MM;
         }
-        if (line_fresh && (distance_command || in.avoidance.near_original_line)) {
+        if (line_fresh && distance_command) {
             if (data.l > tape_search_peak.left) tape_search_peak.left = data.l;
             if (data.c > tape_search_peak.center) tape_search_peak.center = data.c;
             if (data.r > tape_search_peak.right) tape_search_peak.right = data.r;

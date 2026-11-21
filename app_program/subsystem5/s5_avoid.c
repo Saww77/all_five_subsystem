@@ -14,7 +14,14 @@
 #define ARC_SIDEWAYS_MM (S2_ARC_RADIUS_MM / 2u)
 #define ARC_ENTRY_MM (ARC_FORWARD_MM + S5_TURN_CLEARANCE_MM)
 #define DEPARTURE_DIAGONAL_MIN_MM 20u
-#define MIN_ROUNDED_OFFSET_MM (2u * ARC_SIDEWAYS_MM + DEPARTURE_DIAGONAL_MIN_MM)
+#define MIN_DEPARTURE_OFFSET_MM (2u * ARC_SIDEWAYS_MM + DEPARTURE_DIAGONAL_MIN_MM)
+#define TAPE_HALF_WIDTH_MM ((S5_TAPE_WIDTH_MM + 1u) / 2u)
+#define NEAR_IR_TAPE_OFFSET_MM ((S5_OUTER_IR_SPACING_MM + 3u) / 4u + TAPE_HALF_WIDTH_MM)
+#define REJOIN_START_CLEARANCE_MM 8u
+/* At the end of the inward arc, the nearer outer sensor projects forward
+   by the axle offset times sin(60) and sideways by half its spacing times cos(60). */
+#define MIN_REJOIN_OFFSET_MM (ARC_SIDEWAYS_MM + (S5_IR_TO_AXLE_MM * 866u + 999u) / 1000u + \
+                             NEAR_IR_TAPE_OFFSET_MM + REJOIN_START_CLEARANCE_MM)
 #define EDGE_OFFSET_DEADBAND_MM 20u
 #define LINE_ALIGN_TOLERANCE_MM 3
 
@@ -28,6 +35,9 @@ _Static_assert(S5_FOLLOW_CLEAR_MM + S5_LONG_REVERSE_MM <= S5_MAX_PROJECTED_FRONT
 _Static_assert(S5_MAX_PASS_MM < 1024u, "Total pass distance must fit the 10-bit fields");
 _Static_assert(S5_CHASSIS_WIDTH_MM >= EFFECTIVE_TRACK_MM, "Include the outer wheel edges in chassis width");
 _Static_assert(MAX_LATERAL_OFFSET_MM <= 511u, "Lateral offset must fit in 9 bits");
+_Static_assert(S5_IR_TO_AXLE_MM > 0u && S5_OUTER_IR_SPACING_MM > S5_TAPE_WIDTH_MM &&
+                   MIN_REJOIN_OFFSET_MM <= MAX_LATERAL_OFFSET_MM,
+               "The outer sensors must straddle the tape and fit within the bypass limit");
 _Static_assert(((MAX_LATERAL_OFFSET_MM - ARC_SIDEWAYS_MM) * 1000u + 865u) / 866u +
                    S5_SEARCH_MARGIN_MM + S5_SEARCH_EXTENSION_MM <= S5_MAX_LEG_MM && S5_MAX_LEG_MM <= 1023u,
                "Rounded search distance must fit the bounded encoder command");
@@ -78,15 +88,15 @@ void s5_avoid_begin(S5_AVOID *state, uint32_t now)
     *state = (S5_AVOID){.phase = S5_PROFILE_PATH, .phase_at = now};
 }
 
-unsigned s5_reentry_detection_mm(unsigned offset_mm, unsigned sensor_to_axle_mm)
-{
-    unsigned margin = S5_SEARCH_MARGIN_MM + sensor_to_axle_mm;
-    return offset_mm > margin ? offset_mm - margin : 0u;
-}
-
 static unsigned diagonal_distance_mm(unsigned sideways_mm)
 {
     return (sideways_mm * 1000u + 865u) / 866u;
+}
+
+static unsigned reentry_detection_mm(unsigned nominal_travel_mm)
+{
+    unsigned margin = S5_IR_TO_AXLE_MM + diagonal_distance_mm(NEAR_IR_TAPE_OFFSET_MM) + S5_SEARCH_MARGIN_MM;
+    return nominal_travel_mm > margin ? nominal_travel_mm - margin : 0u;
 }
 
 static unsigned departure_diagonal_mm(unsigned offset_mm)
@@ -117,15 +127,16 @@ unsigned s5_planned_pass_mm(const S5_PROFILE *profile, unsigned forward_mm)
 
 static unsigned bypass_offset(int lateral_extent, bool edge_valid)
 {
+    int offset = lateral_extent + (int)S5_SIDE_ALLOWANCE_MM;
     if (!edge_valid) {
         /* A partial profile retains its last observed edge and an uncertainty gap. */
         unsigned extent = lateral_extent > 0 ? (unsigned)lateral_extent : 0u;
-        return S5_SIDE_ALLOWANCE_MM + extent + S5_UNCERTAIN_EDGE_MM;
+        offset = (int)(S5_SIDE_ALLOWANCE_MM + extent + S5_UNCERTAIN_EDGE_MM);
     }
-    int offset = lateral_extent + (int)S5_SIDE_ALLOWANCE_MM;
-    /* Even the shortest sidestep must leave the forward-mounted IR sensors
-       on the approach side of the tape when the car turns to cross it. */
-    return offset > (int)S5_MIN_SIDE_SHIFT_MM ? (unsigned)offset : S5_MIN_SIDE_SHIFT_MM;
+    /* Leave both IR sensors on the approach side until the straight tape search. */
+    unsigned minimum = MIN_REJOIN_OFFSET_MM > MIN_DEPARTURE_OFFSET_MM ?
+                       MIN_REJOIN_OFFSET_MM : MIN_DEPARTURE_OFFSET_MM;
+    return offset > (int)minimum ? (unsigned)offset : minimum;
 }
 
 static unsigned side_range(unsigned heading, unsigned background, unsigned required)
@@ -140,9 +151,8 @@ static unsigned side_range(unsigned heading, unsigned background, unsigned requi
 
 static unsigned required_side_range(unsigned offset)
 {
-    unsigned traverse = offset > MIN_ROUNDED_OFFSET_MM ? offset : MIN_ROUNDED_OFFSET_MM;
-    unsigned diagonal_room = departure_diagonal_mm(traverse) + ARC_ENTRY_MM;
-    unsigned lateral_room = traverse + FRONT_MARGIN_MM + S5_MANEUVER_STOP_MM;
+    unsigned diagonal_room = departure_diagonal_mm(offset) + ARC_ENTRY_MM;
+    unsigned lateral_room = offset + FRONT_MARGIN_MM + S5_MANEUVER_STOP_MM;
     return diagonal_room > lateral_room ? diagonal_room : lateral_room;
 }
 
@@ -241,7 +251,7 @@ static S5_AVOID_OUTPUT find_tape(S5_AVOID *state, const S5_AVOID_INPUT *in, bool
         record_tape_edge(&state->right_edge, in->right_on_tape, state->search_progress_mm);
     }
 
-    if (tape_edges_confirmed(state)) {
+    if (!state->align_at_mm && tape_edges_confirmed(state)) {
         unsigned left = state->left_edge.entry_mm;
         unsigned right = state->right_edge.entry_mm;
         unsigned separation = left > right ? left - right : right - left;
@@ -252,13 +262,19 @@ static S5_AVOID_OUTPUT find_tape(S5_AVOID *state, const S5_AVOID_INPUT *in, bool
         /* Averaging the entries cancels the side offsets of the front sensors.
            Move from the leading edge to the stripe centre, compensate for the
            sensor-to-axle distance, and reserve the final arc's lateral travel. */
-        unsigned stripe_center_mm = (left + right + 1u) / 2u +
-                                    diagonal_distance_mm((S5_TAPE_WIDTH_MM + 1u) / 2u);
-        int turn_start_mm = (int)(stripe_center_mm + in->sensor_to_axle_mm) -
+        unsigned stripe_center_mm = (left + right + 1u) / 2u + diagonal_distance_mm(TAPE_HALF_WIDTH_MM);
+        int turn_start_mm = (int)(stripe_center_mm + S5_IR_TO_AXLE_MM) -
                             (int)diagonal_distance_mm(ARC_SIDEWAYS_MM);
-        if (turn_start_mm < 0 || (unsigned)turn_start_mm > S5_MAX_LEG_MM)
+        if (turn_start_mm <= 0 || (unsigned)turn_start_mm > S5_MAX_LEG_MM)
             return fail(state, S5_FAIL_LINE, in->now);
         state->align_at_mm = (unsigned)turn_start_mm;
+    }
+
+    /* Use the rest of the straight search move to reach the turn point.
+       If the search ends first, CENTER_LINE supplies the remaining travel. */
+    if (state->align_at_mm) {
+        if (!state->search_exhausted && state->search_progress_mm < state->align_at_mm)
+            return (S5_AVOID_OUTPUT){.action = S5_WAIT};
         go(state, S5_CENTER_LINE, in->now);
         return (S5_AVOID_OUTPUT){.action = S5_STOP};
     }
@@ -281,7 +297,8 @@ static S5_AVOID_OUTPUT center_for_turn(S5_AVOID *state, const S5_AVOID_INPUT *in
     if (adjustment >= -LINE_ALIGN_TOLERANCE_MM && adjustment <= LINE_ALIGN_TOLERANCE_MM)
         return go(state, S5_ALIGN_LINE, in->now);
     unsigned distance = (unsigned)(adjustment < 0 ? -adjustment : adjustment);
-    if (distance > S5_SEARCH_MARGIN_MM) return fail(state, S5_FAIL_LINE, in->now);
+    unsigned limit = adjustment < 0 ? S5_SEARCH_MARGIN_MM : S5_IR_TO_AXLE_MM;
+    if (distance > limit) return fail(state, S5_FAIL_LINE, in->now);
     return (S5_AVOID_OUTPUT){.action = adjustment < 0 ? S5_REVERSE : S5_ADVANCE,
                              .distance_mm = distance};
 }
@@ -424,7 +441,7 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         if (plan.side != S5_NO_SIDE) {
             unsigned pass = s5_planned_pass_mm(&profile, range_fresh ? in->range_mm : S5_UNKNOWN_RANGE);
             if (pass > S5_MAX_PASS_MM) return wait_for_path(state, S5_FAIL_ROOM, in);
-            unsigned offset = plan.offset_mm > MIN_ROUNDED_OFFSET_MM ? plan.offset_mm : MIN_ROUNDED_OFFSET_MM;
+            unsigned offset = plan.offset_mm;
             unsigned diagonal = departure_diagonal_mm(offset);
             unsigned forward_credit = 2u * ARC_FORWARD_MM + (diagonal + 1u) / 2u;
             unsigned return_diagonal = diagonal_distance_mm(offset - ARC_SIDEWAYS_MM);
@@ -434,7 +451,7 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
             state->diagonal_mm = diagonal;
             state->pass_mm = pass > forward_credit ? pass - forward_credit : 0u;
             state->search_mm = return_diagonal + S5_SEARCH_MARGIN_MM + S5_SEARCH_EXTENSION_MM;
-            state->search_after_mm = s5_reentry_detection_mm(return_diagonal, in->sensor_to_axle_mm);
+            state->search_after_mm = reentry_detection_mm(return_diagonal);
             return go(state, S5_TURN_OUT, in->now);
         }
         S5_FAILURE reason = plan.failure;
