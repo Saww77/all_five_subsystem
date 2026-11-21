@@ -10,6 +10,14 @@ bool vc_core_running(const VC_MODEL *model)
     return model->state == VC_FOLLOW_LINE || vc_core_detouring(model);
 }
 
+bool vc_core_needs_line(const VC_MODEL *model)
+{
+    if (model->state == VC_FOLLOW_LINE) return true;
+    S5_PHASE phase = model->avoidance.phase;
+    return vc_core_detouring(model) &&
+           (phase == S5_BACK_UP || phase == S5_FIND_LINE || phase == S5_CHECK_LINE);
+}
+
 VC_START_BLOCK vc_core_start_block(const VC_MODEL *model, const VC_INPUT *in)
 {
     if (in->stop || in->reset || (!vc_core_running(model) && in->motor_busy))
@@ -60,7 +68,13 @@ void vc_core_step(VC_MODEL *m, const VC_INPUT *in, VC_OUTPUT *out)
 
     /* Once START is accepted, navigation uses local sensors. */
     if (!in->ready) { halt(m, in, VC_FAULT, VC_REASON_MOTOR); return; }
-    if (!in->line_valid || in->line_age_ms > VC_LINE_MAX_AGE_MS) {
+    if (vc_core_needs_line(m) && (!in->line_valid || in->line_age_ms > VC_LINE_MAX_AGE_MS)) {
+        S5_PHASE phase = m->avoidance.phase;
+        /* A completed encoder leg can wait at rest for the next valid IR
+           sample. Once a tape search starts, stale data still stops it. */
+        if (vc_core_detouring(m) && (phase == S5_FIND_LINE || phase == S5_CHECK_LINE) &&
+            in->avoidance.motion == S5_MOTION_NONE &&
+            in->avoidance.now - m->avoidance.phase_at < VC_LINE_REACQUIRE_WAIT_MS) return;
         halt(m, in, VC_FAULT, VC_REASON_STALE_LINE);
         return;
     }

@@ -322,10 +322,18 @@ int main(void)
     complete_move();
     settle_step();
     assert(queued_command == S2_ARC);
-    complete_move();
+    motor_acknowledge(S2_REPLY_OK);
+    work();
+    unsigned before_ir_gap = stop_count;
+    clock_ms += 170;
+    vehicle_notify_feedback();
+    assert(work() == VC_REFRESH_MS && model.avoidance.phase == S5_ALIGN_OUTSIDE &&
+           stop_count == before_ir_gap && motor_busy);
+    motor_stopped();
+    work();
 
     settle_step();
-    assert(model.avoidance.phase == S5_PASS && (queued_command >> 4) == 196 + 236 + 160 - 209);
+    assert(model.avoidance.phase == S5_PASS && (queued_command >> 4) == 196 + 177 + 160 - 209);
     complete_move();
     settle_step();
     assert(model.avoidance.phase == S5_TURN_IN && queued_command == S2_ARC);

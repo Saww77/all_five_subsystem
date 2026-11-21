@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "../subsystem5/s5_avoid.h"
 #define VC_LINE_MAX_AGE_MS 150u
+#define VC_LINE_REACQUIRE_WAIT_MS 1000u
 #define VC_SENSOR_MAX_AGE_MS 1000u
 typedef enum { VC_IDLE, VC_FOLLOW_LINE, VC_TURNING, VC_AVOIDING,
                VC_RECOVER_LINE, VC_FAULT } VC_STATE;
@@ -30,6 +31,7 @@ typedef struct {
 } VC_OUTPUT;
 bool vc_core_detouring(const VC_MODEL *model);
 bool vc_core_running(const VC_MODEL *model);
+bool vc_core_needs_line(const VC_MODEL *model);
 VC_START_BLOCK vc_core_start_block(const VC_MODEL *model, const VC_INPUT *in);
 void vc_core_step(VC_MODEL *model, const VC_INPUT *in, VC_OUTPUT *out);
 #endif

@@ -449,9 +449,10 @@ static TMO vehicle_service_once(void)
     unsigned left_measured = s2_get_bits(&status, 9, 9);
     unsigned right_measured = s2_get_bits(&status, 18, 9);
     in.avoidance.stopped = ready && !busy && left_measured <= 2 && right_measured <= 2;
+    bool line_fresh = in.line_valid && in.line_age_ms <= VC_LINE_MAX_AGE_MS;
     /* The outer sensors straddle the tape on a straight. This reading alone
        cannot confirm tape after a detour. */
-    in.avoidance.line_centered = !in.avoidance.line_hit &&
+    in.avoidance.line_centered = line_fresh && !in.avoidance.line_hit &&
                                 data.l < S5_LINE_DARK && data.r < S5_LINE_DARK;
     if (model.avoidance.phase == S5_FIND_LINE) {
         unsigned min_cross_mm = model.avoidance.search_after_mm;
@@ -470,8 +471,7 @@ static TMO vehicle_service_once(void)
     bool straight = model.state == VC_FOLLOW_LINE && in.avoidance.line_centered &&
                     in.left_rpm == in.right_rpm &&
                     left_measured >= 5u && right_measured >= 5u &&
-                    left_measured <= right_measured + 3 && right_measured <= left_measured + 3 &&
-                    in.line_valid && in.line_age_ms <= VC_LINE_MAX_AGE_MS;
+                    left_measured <= right_measured + 3 && right_measured <= left_measured + 3;
     if (straight && !tracking_straight) straight_since = now;
     tracking_straight = straight;
     in.avoidance.can_retrace = straight && now - straight_since >= VC_RETRACE_MIN_MS;
@@ -545,8 +545,11 @@ static TMO vehicle_service_once(void)
     data.motor_faults = in.motor_faults;
     TMO delay = pending.reset ? (TMO)VC_REFRESH_MS : TMO_FEVR;
     if (vc_core_running(&model)) {
-        uint32_t line_remaining = VC_LINE_MAX_AGE_MS + 1u - in.line_age_ms;
-        delay = line_remaining < VC_REFRESH_MS ? line_remaining : VC_REFRESH_MS;
+        delay = VC_REFRESH_MS;
+        if (vc_core_needs_line(&model) && line_fresh) {
+            uint32_t line_remaining = VC_LINE_MAX_AGE_MS + 1u - in.line_age_ms;
+            if (line_remaining < (uint32_t)delay) delay = line_remaining;
+        }
         if (in.avoidance.range_valid) {
             uint32_t range_remaining = S5_RANGE_MAX_AGE_MS + 1u - (now - in.avoidance.range_at);
             if (range_remaining < (uint32_t)delay) delay = range_remaining;
