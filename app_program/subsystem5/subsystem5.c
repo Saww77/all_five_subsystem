@@ -271,16 +271,16 @@ static BOOL setup(void)
 }
 
 #if !APP_S5_BENCH
-static unsigned check_return_path(S5_SIDE bypass_side, uint32_t request)
+static unsigned check_return_path(S5_SIDE look_side, uint32_t request)
 {
     _Static_assert(S5_RETURN_INNER_BEARING % S5_FINE_STEP == 0 &&
                    S5_RETURN_OUTER_BEARING % S5_FINE_STEP == 0 &&
                    S5_RETURN_OUTER_BEARING <= S5_MAX_ANGLE - S5_CENTRE_ANGLE,
                    "Return bearings must be covered on both sides of the servo sweep");
-    /* From the left bypass the tape is to the right, and vice versa. */
-    int direction = bypass_side == S5_LEFT ? 1 : -1;
-    unsigned inner_index = (unsigned)((int)S5_CENTRE_INDEX + direction * (int)(S5_RETURN_INNER_BEARING / S5_FINE_STEP));
-    unsigned outer_index = (unsigned)((int)S5_CENTRE_INDEX + direction * (int)(S5_RETURN_OUTER_BEARING / S5_FINE_STEP));
+    unsigned inner_index = s5_side_scan_index(look_side, S5_RETURN_INNER_BEARING);
+    unsigned outer_index = s5_side_scan_index(look_side, S5_RETURN_OUTER_BEARING);
+    tm_printf((UB*)"[S5] checking %s of the car at %u and %u deg\n",
+              look_side == S5_LEFT ? "left" : "right", s5_scan_bearing(inner_index), s5_scan_bearing(outer_index));
     unsigned inner = read_at(inner_index, FALSE, true, S5_UNKNOWN_RANGE);
     unsigned outer = S5_UNKNOWN_RANGE;
     if (vehicle_obstacle_scan_current(request))
@@ -305,11 +305,11 @@ static void scan_task(INT stacd, void *exinf)
         ER wake = tk_wai_flg(scan_event, SCAN_WAKE, TWF_ORW | TWF_BITCLR, &events, PING_INTERVAL_MS);
 
         uint32_t request;
-        S5_SIDE check_side;
+        S5_SIDE look_side;
         unsigned limit_mm;
-        if (wake == E_OK && vehicle_obstacle_scan_request(&request, &check_side, &limit_mm)) {
-            if (check_side != S5_NO_SIDE) {
-                unsigned clearance = check_return_path(check_side, request);
+        if (wake == E_OK && vehicle_obstacle_scan_request(&request, &look_side, &limit_mm)) {
+            if (look_side != S5_NO_SIDE) {
+                unsigned clearance = check_return_path(look_side, request);
                 vehicle_finish_obstacle_return_check(clearance, request);
             } else {
                 S5_PROFILE profile;
@@ -386,7 +386,7 @@ static void bench_print_plan(const S5_PROFILE *profile)
     tm_printf((UB*)"[S5 BENCH] plan=%s turn=%u deg departure=%u mm lateral_offset=%u mm pass=%u mm\n",
               plan.side == S5_LEFT ? "T (left)" : "R (right)",
               S5_LATERAL_TURN_DEG, (unsigned)plan.offset_mm,
-              (unsigned)plan.offset_mm, (unsigned)plan.pass_mm + S5_EXTRA_PASS_MM);
+              (unsigned)plan.offset_mm, (unsigned)plan.pass_mm);
 }
 
 static void bench_task(INT stacd,void *exinf)

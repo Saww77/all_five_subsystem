@@ -350,29 +350,35 @@ int main(void)
     vehicle_notify_feedback();
     assert(work() > 0 && (queued_command >> 4) == left_offset - 55);
 
-    /* Reproduce the completed parallel leg with the motor still settling. */
-    vehicle_request_stop();
-    work();
-    model = (VC_MODEL){.state = VC_AVOIDING, .avoidance = {
-        .phase = S5_VERIFY_RETURN, .side = S5_RIGHT, .phase_at = clock_ms,
-        .offset_mm = 235, .passed_mm = 300,
-    }};
-    vehicle_notify_feedback();
-    scans_before = scan_count;
-    work();
-    assert(scan_count == scans_before && !vehicle_obstacle_scan_request(&request, NULL, NULL));
-    motor_stopped();
-    work();
-    S5_SIDE check_side = S5_NO_SIDE;
-    assert(scan_count == scans_before + 1 && vehicle_obstacle_scan_request(&request, &check_side, NULL));
-    assert(check_side == S5_RIGHT);
-    vehicle_finish_obstacle_scan(NULL, request);
-    assert(vehicle_obstacle_scan_current(request) && !pending.return_received);
-    vehicle_request_stop();
-    work();
-    assert(!vehicle_obstacle_scan_current(request));
-    vehicle_finish_obstacle_return_check(S5_OPEN_RANGE, request);
-    assert(!pending.return_received && !queued_command);
+    /* Reproduce a completed parallel leg on each side with the motor still settling. */
+    for (unsigned bypass_side = S5_LEFT; bypass_side <= S5_RIGHT; ++bypass_side) {
+        vehicle_request_stop();
+        work();
+        model = (VC_MODEL){.state = VC_AVOIDING, .avoidance = {
+            .phase = S5_VERIFY_RETURN, .side = bypass_side, .phase_at = clock_ms,
+            .offset_mm = 235, .passed_mm = 300,
+        }};
+        vehicle_notify_feedback();
+        scans_before = scan_count;
+        work();
+        assert(scan_count == scans_before && !vehicle_obstacle_scan_request(&request, NULL, NULL));
+        motor_stopped();
+        work();
+        S5_SIDE look_side = S5_NO_SIDE;
+        assert(scan_count == scans_before + 1 && vehicle_obstacle_scan_request(&request, &look_side, NULL));
+        assert(look_side == (bypass_side == S5_RIGHT ? S5_LEFT : S5_RIGHT));
+        assert(s5_scan_bearing(s5_side_scan_index(look_side, S5_RETURN_INNER_BEARING)) ==
+               (bypass_side == S5_RIGHT ? 135 : 45));
+        assert(s5_scan_bearing(s5_side_scan_index(look_side, S5_RETURN_OUTER_BEARING)) ==
+               (bypass_side == S5_RIGHT ? 150 : 30));
+        vehicle_finish_obstacle_scan(NULL, request);
+        assert(vehicle_obstacle_scan_current(request) && !pending.return_received);
+        vehicle_request_stop();
+        work();
+        assert(!vehicle_obstacle_scan_current(request));
+        vehicle_finish_obstacle_return_check(S5_OPEN_RANGE, request);
+        assert(!pending.return_received && !queued_command);
+    }
     vehicle_submit_obstacle_range(500);
     assert(!obstacle_blocked(clock_ms));
     vehicle_submit_obstacle_range(S5_FOLLOW_STOP_MM + 1);

@@ -17,9 +17,10 @@
 #define RETURN_MARGIN_MM 70u
 #define EDGE_OFFSET_DEADBAND_MM 20u
 
-_Static_assert(S5_FOLLOW_CLEAR_MM + FOLLOW_AHEAD_MARGIN_MM + S5_EXTRA_PASS_MM <= S5_MAX_PASS_MM,
+_Static_assert(S5_FOLLOW_CLEAR_MM + FOLLOW_AHEAD_MARGIN_MM + S5_REAR_CLEARANCE_MM <= S5_MAX_PASS_MM,
                "The maximum profiled distance must fit the bypass budget");
-_Static_assert(S5_MAX_PASS_MM < 512u, "Bypass distances must fit the 9-bit fields");
+_Static_assert(S5_FOLLOW_CLEAR_MM + FOLLOW_AHEAD_MARGIN_MM < 512u, "The initial pass must fit the plan");
+_Static_assert(S5_MAX_PASS_MM < 1024u, "Total pass distance must fit the 10-bit fields");
 _Static_assert(S5_CHASSIS_WIDTH_MM >= EFFECTIVE_TRACK_MM, "Include the outer wheel edges in chassis width");
 _Static_assert(S5_OUTWARD_LIMIT_MM < 64u && S5_OUTWARD_LIMIT_MM % S5_OUTWARD_STEP_MM == 0,
                "The outward correction must fit whole bounded steps");
@@ -189,6 +190,7 @@ static S5_AVOID_OUTPUT avoid_on_leg(S5_AVOID *state, const S5_AVOID_INPUT *in)
     state->reverse_long = travelled >= S5_LONG_REVERSE_MM;
     state->offset_mm = state->next_pass_mm = state->passed_mm = 0;
     state->widening = false;
+    state->rear_clearance_pending = false;
     state->additional_outward_mm = 0;
     go(state, S5_PROFILE_PATH, in->now);
     return (S5_AVOID_OUTPUT){.action = S5_STOP};
@@ -290,6 +292,17 @@ static void clear_path_failure(S5_AVOID *state)
     state->failed_phase = S5_OFF;
 }
 
+static S5_AVOID_OUTPUT search_farther_alongside(S5_AVOID *state, S5_PHASE next, uint32_t now)
+{
+    /* Keep enough runway for the rear-clearance move after the next clear reading. */
+    unsigned budget_used = state->passed_mm + S5_REAR_CLEARANCE_MM;
+    if (budget_used >= S5_MAX_PASS_MM) return fail(state, S5_FAIL_CLOSE, now);
+    unsigned remaining = S5_MAX_PASS_MM - budget_used;
+    state->rear_clearance_pending = false;
+    state->next_pass_mm = remaining < RETRY_STEP_MM ? remaining : RETRY_STEP_MM;
+    return go(state, next, now);
+}
+
 S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
 {
     S5_PHASE phase = state->phase;
@@ -307,12 +320,14 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         if (!in->stopped || !in->return_received || !at_or_after(in->return_at, state->phase_at))
             return wait;
         unsigned required = state->offset_mm + RETURN_MARGIN_MM;
-        if (in->return_clear_mm >= required && in->return_clear_mm != S5_UNKNOWN_RANGE)
-            return go(state, S5_TURN_IN, in->now);
         if (in->return_clear_mm == S5_UNKNOWN_RANGE) return fail(state, S5_FAIL_ECHO, in->now);
-        if (state->passed_mm >= S5_MAX_PASS_MM) return fail(state, S5_FAIL_CLOSE, in->now);
-        unsigned remaining = S5_MAX_PASS_MM - state->passed_mm;
-        state->next_pass_mm = remaining < RETRY_STEP_MM ? remaining : RETRY_STEP_MM;
+        if (in->return_clear_mm < required)
+            return search_farther_alongside(state, S5_PASS, in->now);
+        if (state->rear_clearance_pending) return go(state, S5_TURN_IN, in->now);
+        if (state->passed_mm + S5_REAR_CLEARANCE_MM > S5_MAX_PASS_MM)
+            return fail(state, S5_FAIL_CLOSE, in->now);
+        state->rear_clearance_pending = true;
+        state->next_pass_mm = S5_REAR_CLEARANCE_MM;
         return go(state, S5_PASS, in->now);
     }
     if (phase == S5_WAIT_PATH) {
@@ -388,7 +403,7 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
             state->side = plan.side;
             state->probe_left = plan.probe_left;
             state->offset_mm = plan.offset_mm;
-            state->next_pass_mm = plan.pass_mm + (state->depth ? 0u : S5_EXTRA_PASS_MM);
+            state->next_pass_mm = plan.pass_mm;
             return go(state, S5_TURN_OUT, in->now);
         }
         S5_FAILURE reason = plan.failure;
@@ -516,11 +531,9 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         (in->range_mm <= S5_SCAN_STOP_MM || in->range_mm < distance + S5_MANEUVER_STOP_MM)) {
         /* The angled side scan can see past an obstacle beside the chassis.
            Check again while facing the tape before driving into that corridor. */
-        if (in->range_mm < S5_TURN_CLEARANCE_MM || state->passed_mm >= S5_MAX_PASS_MM)
+        if (in->range_mm < S5_TURN_CLEARANCE_MM)
             return fail(state, S5_FAIL_CLOSE, in->now);
-        unsigned remaining = S5_MAX_PASS_MM - state->passed_mm;
-        state->next_pass_mm = remaining < RETRY_STEP_MM ? remaining : RETRY_STEP_MM;
-        return go(state, S5_ALIGN_RETRY, in->now);
+        return search_farther_alongside(state, S5_ALIGN_RETRY, in->now);
     }
     if (in->range_mm <= S5_SCAN_STOP_MM) {
         if (state->widening) return fail(state, S5_FAIL_CLOSE, in->now);

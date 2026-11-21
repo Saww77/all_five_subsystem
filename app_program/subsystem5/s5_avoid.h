@@ -8,8 +8,8 @@
 #define S5_RANGE_MAX_AGE_MS 300u
 #define S5_SLOW_RANGE_MM 500u
 #define S5_MANEUVER_STOP_MM 150u
-#define S5_MAX_PASS_MM 500u
-#define S5_EXTRA_PASS_MM 100u
+#define S5_MAX_PASS_MM 600u
+#define S5_REAR_CLEARANCE_MM 100u
 #define S5_APPROACH_RPM 20u
 #define S5_CLEARANCE_BEARING_DEG 45u
 #define S5_LATERAL_TURN_DEG 90u
@@ -41,6 +41,14 @@ typedef enum {
     S5_VERIFY_RETURN
 } S5_PHASE;
 typedef enum { S5_NO_SIDE, S5_LEFT, S5_RIGHT } S5_SIDE;
+
+/* Convert a physical left or right look into the corresponding sweep index. */
+static inline unsigned s5_side_scan_index(S5_SIDE look_side, unsigned bearing)
+{
+    unsigned steps = bearing / S5_FINE_STEP;
+    return look_side == S5_LEFT ? S5_CENTRE_INDEX - steps : S5_CENTRE_INDEX + steps;
+}
+
 typedef enum { S5_WAIT, S5_STOP, S5_ADVANCE, S5_PIVOT_LEFT, S5_PIVOT_RIGHT, S5_REVERSE, S5_RESCAN } S5_ACTION;
 typedef enum { S5_MOTION_NONE, S5_MOTION_QUEUED, S5_MOTION_PENDING, S5_MOTION_DONE, S5_MOTION_FAILED } S5_MOTION;
 typedef enum {
@@ -64,7 +72,7 @@ typedef struct {
     bool return_received : 1;
 } S5_AVOID_INPUT;
 typedef struct {
-    unsigned phase:5, side:2, offset_mm:10, next_pass_mm:9;
+    unsigned phase:5, side:2, offset_mm:10, next_pass_mm:10;
     unsigned passed_mm:10, progress_mm:10, line_goal_mm:10;
     unsigned additional_outward_mm:6;
 } S5_INTERRUPTED_LEG;
@@ -74,10 +82,10 @@ typedef struct {
     S5_INTERRUPTED_LEG interrupted[S5_NESTED_LIMIT];
     unsigned phase:5, side:2, line_samples:2, reverse_available:1;
     unsigned reverse_long:1, scan_retried:1, probe_left:1, failure:4, failed_phase:5;
-    unsigned offset_mm:10, next_pass_mm:9, passed_mm:10, depth:2;
+    unsigned offset_mm:10, next_pass_mm:10, passed_mm:10, depth:2;
     unsigned leg_progress_mm:10, issued_mm:10, waiting_echo:1, short_approach:1;
     unsigned blocked_range_mm:12;
-    unsigned widening:1, additional_outward_mm:6;
+    unsigned widening:1, additional_outward_mm:6, rear_clearance_pending:1;
 } S5_AVOID;
 typedef struct {
     uint16_t action : 3;

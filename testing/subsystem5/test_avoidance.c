@@ -90,6 +90,22 @@ static void return_check(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out, unsigned
     in->avoidance.return_received = false;
 }
 
+static void clear_rear_and_recheck(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out)
+{
+    unsigned passed = model->avoidance.passed_mm;
+    return_check(model, in, out, S5_OPEN_RANGE);
+    assert(model->avoidance.phase == S5_PASS && model->avoidance.rear_clearance_pending);
+    start_move(model, in, out, S5_ADVANCE, S5_REAR_CLEARANCE_MM);
+    end_move(model, in, out);
+    assert(model->avoidance.phase == S5_VERIFY_RETURN &&
+           model->avoidance.passed_mm == passed + S5_REAR_CLEARANCE_MM);
+    in->avoidance.return_received = true;
+    step(model, in, out, 20); /* The reading from before the extra move is stale. */
+    assert(model->avoidance.phase == S5_VERIFY_RETURN && out->maneuver.action == S5_WAIT);
+    return_check(model, in, out, S5_OPEN_RANGE);
+    assert(model->avoidance.phase == S5_TURN_IN);
+}
+
 static void reach_inward_turn(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out, bool left, bool open_side)
 {
     S5_ACTION outward = left ? S5_PIVOT_LEFT : S5_PIVOT_RIGHT;
@@ -118,9 +134,9 @@ static void reach_inward_turn(VC_MODEL *model, VC_INPUT *in, VC_OUTPUT *out, boo
     end_move(model, in, out);
     start_move(model, in, out, inward, 0);
     end_move(model, in, out);
-    start_move(model, in, out, S5_ADVANCE, S5_SCAN_STOP_MM + 130 + S5_EXTRA_PASS_MM);
+    start_move(model, in, out, S5_ADVANCE, S5_SCAN_STOP_MM + 130);
     end_move(model, in, out);
-    return_check(model, in, out, S5_OPEN_RANGE);
+    clear_rear_and_recheck(model, in, out);
     unsigned forward_range = in->avoidance.range_mm;
     in->avoidance.range_mm = 200; /* Tight ahead while still parallel to the tape. */
     start_move(model, in, out, inward, 0);
@@ -146,9 +162,9 @@ static void test_rejoin(bool left, bool retry, bool open_side)
         start_move(&model, &in, &out, outward, 0);
         end_move(&model, &in, &out);
         in.avoidance.range_mm = 1000;
-        start_move(&model, &in, &out, S5_ADVANCE, S5_MAX_PASS_MM - (S5_SCAN_STOP_MM + 130 + S5_EXTRA_PASS_MM));
+        start_move(&model, &in, &out, S5_ADVANCE, S5_MAX_PASS_MM - model.avoidance.passed_mm - S5_REAR_CLEARANCE_MM);
         end_move(&model, &in, &out);
-        return_check(&model, &in, &out, S5_OPEN_RANGE);
+        clear_rear_and_recheck(&model, &in, &out);
         in.avoidance.range_mm = 200;
         start_move(&model, &in, &out, inward, 0);
         end_move(&model, &in, &out);
@@ -499,9 +515,9 @@ static void test_lateral_bypass_at_start(void)
     end_move(&model, &in, &out);
     start_move(&model, &in, &out, S5_PIVOT_LEFT, 0);
     end_move(&model, &in, &out);
-    start_move(&model, &in, &out, S5_ADVANCE, plan.pass_mm + S5_EXTRA_PASS_MM);
+    start_move(&model, &in, &out, S5_ADVANCE, plan.pass_mm);
     end_move(&model, &in, &out);
-    return_check(&model, &in, &out, S5_OPEN_RANGE);
+    clear_rear_and_recheck(&model, &in, &out);
     in.avoidance.range_mm = 200; /* Enough to pivot, too little room to roll inward. */
     start_move(&model, &in, &out, S5_PIVOT_LEFT, 0);
     end_move(&model, &in, &out);
@@ -682,7 +698,7 @@ static void test_obstacle_during_pass(void)
     start_move(&model, &in, &out, S5_ADVANCE, 50);
     end_move(&model, &in, &out);
     assert(model.avoidance.phase == S5_VERIFY_RETURN && model.avoidance.passed_mm == 350);
-    return_check(&model, &in, &out, S5_OPEN_RANGE);
+    clear_rear_and_recheck(&model, &in, &out);
     in.avoidance.range_mm = 200;
     start_move(&model, &in, &out, S5_PIVOT_RIGHT, 0);
 }
@@ -816,7 +832,7 @@ static void test_extra_pass_before_return(bool left)
     end_move(&model, &in, &out);
     start_move(&model, &in, &out, inward, 0);
     end_move(&model, &in, &out);
-    unsigned first_pass = S5_FOLLOW_STOP_MM + 130 + S5_EXTRA_PASS_MM;
+    unsigned first_pass = S5_FOLLOW_STOP_MM + 130;
     start_move(&model, &in, &out, S5_ADVANCE, first_pass);
     end_move(&model, &in, &out);
 
@@ -827,9 +843,9 @@ static void test_extra_pass_before_return(bool left)
     assert(model.avoidance.phase == S5_VERIFY_RETURN && out.maneuver.action == S5_WAIT);
     return_check(&model, &in, &out, 110);
     assert(model.avoidance.phase == S5_PASS);
-    start_move(&model, &in, &out, S5_ADVANCE, S5_MAX_PASS_MM - first_pass);
+    start_move(&model, &in, &out, S5_ADVANCE, 60);
     end_move(&model, &in, &out);
-    return_check(&model, &in, &out, S5_OPEN_RANGE);
+    clear_rear_and_recheck(&model, &in, &out);
     in.avoidance.range_valid = false;
     step(&model, &in, &out, 260);
     assert(model.avoidance.phase == S5_TURN_IN && out.maneuver.action == S5_WAIT);
@@ -865,6 +881,11 @@ static void test_return_and_pivot_interlocks(void)
     S5_AVOID_INPUT in = {.now = 200, .return_at = 190, .stopped = true,
                         .return_received = true, .return_clear_mm = 110};
     assert(s5_avoid_step(&state, &in).action == S5_STOP && state.failure == S5_FAIL_CLOSE);
+    state = (S5_AVOID){.phase = S5_VERIFY_RETURN, .phase_at = 100, .offset_mm = 225,
+                       .passed_mm = 460, .rear_clearance_pending = true};
+    S5_AVOID_OUTPUT blocked_again = s5_avoid_step(&state, &in);
+    assert(blocked_again.action == S5_WAIT && state.phase == S5_PASS && !state.rear_clearance_pending);
+    assert(state.next_pass_mm == S5_MAX_PASS_MM - 460 - S5_REAR_CLEARANCE_MM);
     state = (S5_AVOID){.phase = S5_VERIFY_RETURN, .phase_at = 100, .offset_mm = 225};
     in.return_clear_mm = S5_UNKNOWN_RANGE;
     assert(s5_avoid_step(&state, &in).action == S5_STOP && state.failure == S5_FAIL_ECHO);

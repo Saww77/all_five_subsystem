@@ -245,14 +245,17 @@ static BOOL scan_wanted(void)
     return (profile || return_check) && !pending.stop && !pending.line_stop;
 }
 
-BOOL vehicle_obstacle_scan_request(uint32_t *request, S5_SIDE *check_side, unsigned *limit_mm)
+BOOL vehicle_obstacle_scan_request(uint32_t *request, S5_SIDE *look_side, unsigned *limit_mm)
 {
     if (!request || !lock()) return FALSE;
     BOOL allowed = scan_wanted() && pending.scan == SCAN_READY;
     if (allowed) {
         *request = scan_request_id;
-        if (check_side)
-            *check_side = model.avoidance.phase == S5_VERIFY_RETURN ? model.avoidance.side : S5_NO_SIDE;
+        if (look_side) {
+            *look_side = S5_NO_SIDE;
+            if (model.avoidance.phase == S5_VERIFY_RETURN)
+                *look_side = model.avoidance.side == S5_RIGHT ? S5_LEFT : S5_RIGHT;
+        }
         if (limit_mm) *limit_mm = model.avoidance.depth ? S5_CLEAR_MM : S5_FOLLOW_CLEAR_MM;
         pending.scan = SCAN_ACTIVE;
     }
@@ -506,6 +509,7 @@ static TMO vehicle_service_once(void)
     unsigned pass = model.avoidance.next_pass_mm;
     unsigned depth = model.avoidance.depth;
     bool widening = model.avoidance.widening;
+    bool rear_clearance_pending = model.avoidance.rear_clearance_pending;
     /* Serialize dispatch with the request latch, so STOP can cancel an entire
        batch before any later movement is submitted. */
     submit_output(&in, &out, &reply, vc_core_detouring(&model));
@@ -552,9 +556,13 @@ static TMO vehicle_service_once(void)
     if (!dispatch_failed && (out.maneuver.action == S5_PIVOT_LEFT || out.maneuver.action == S5_PIVOT_RIGHT))
         tm_printf((UB*)"[S5] commanding %u deg pivot %s\n", S5_LATERAL_TURN_DEG,
                   out.maneuver.action == S5_PIVOT_LEFT ? "left" : "right");
-    if (previous == S5_VERIFY_RETURN && phase == S5_PASS && in.avoidance.return_received)
-        tm_printf((UB*)"[S5] return corridor obstructed at %u mm lateral, passing %u mm farther\n",
-                  (unsigned)in.avoidance.return_clear_mm, pass);
+    if (previous == S5_VERIFY_RETURN && phase == S5_PASS && in.avoidance.return_received) {
+        if (rear_clearance_pending)
+            tm_printf((UB*)"[S5] side clear, advancing %u mm before rechecking rear clearance\n", pass);
+        else
+            tm_printf((UB*)"[S5] return corridor obstructed at %u mm lateral, passing %u mm farther\n",
+                      (unsigned)in.avoidance.return_clear_mm, pass);
+    }
     if (previous != phase) {
         tm_printf((UB*)"[S5] avoidance phase=%u side=%u at %u ms: %s\n",
                   (unsigned)phase, side, (unsigned)now, avoidance_phase_name[phase]);
