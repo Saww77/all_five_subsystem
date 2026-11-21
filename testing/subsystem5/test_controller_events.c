@@ -450,6 +450,13 @@ int main(void)
     vehicle_submit_obstacle_range(S5_FOLLOW_CLEAR_MM + 1);
     assert(!obstacle_blocked(clock_ms));
 
+    vehicle_submit_obstacle_range(S5_OPEN_RANGE);
+    vehicle_submit_obstacle_range(S5_OPEN_RANGE);
+    motor_stopped();
+    work();
+    assert(vehicle_get_snapshot(&snapshot) && snapshot.obstacle_forward_mm == S5_OPEN_RANGE &&
+           !snapshot.obstacle_blocked && snapshot.start_block == VC_START_OBSTACLE);
+
     /* RESET acknowledges an off-track sonar fault without authorizing movement. */
     assert(vehicle_state() == VC_FAULT && !vehicle_request_start());
     vehicle_request_stop();
@@ -471,6 +478,21 @@ int main(void)
     assert(vehicle_request_start());
     work();
     assert(vehicle_state() == VC_FOLLOW_LINE && queued_command && !model.reposition_required);
+
+    vehicle_request_stop();
+    work();
+    motor_stopped();
+    work();
+    model = (VC_MODEL){.state = VC_AVOIDING, .avoidance = {
+        .phase = S5_WAIT_PATH, .phase_at = clock_ms, .scan_retried = true, .blocked_range_mm = 200,
+    }};
+    vehicle_submit_obstacle_range(200);
+    work();
+    scans_before = scan_count;
+    assert(vehicle_request_start());
+    work();
+    assert(model.avoidance.phase == S5_PROFILE_PATH && scan_count == scans_before + 1 &&
+           !queued_command);
 
     puts("PASS MQTT loss, local STOP, left pivot, one missed echo and resume after echo recovery");
 }

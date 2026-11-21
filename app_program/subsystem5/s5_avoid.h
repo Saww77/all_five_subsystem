@@ -73,7 +73,7 @@ typedef struct {
     bool stopped : 1, range_valid : 1, profile_valid : 1;
     bool line_hit : 1, line_junction : 1, line_centered : 1, can_retrace : 1;
     bool near_original_line : 1, can_retrace_far : 1, echo_quiet : 1;
-    bool return_received : 1, line_center_seen : 1;
+    bool return_received : 1, line_center_seen : 1, retry_scan : 1;
 } S5_AVOID_INPUT;
 typedef struct {
     unsigned phase:5, side:2, offset_mm:10, next_pass_mm:10;

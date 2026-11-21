@@ -40,6 +40,19 @@ static void publish_controller(const VEHICLE_SNAPSHOT *s)
     bytes[29]=s->control_gap_limit_us&255;bytes[30]=s->control_gap_limit_us>>8;
     account((ER)mqtt_bridge_send(MQTT_ROUTE_CONTROLLER,bytes,sizeof(bytes)));
 }
+
+static void publish_sonar(const VEHICLE_SNAPSHOT *s)
+{
+    static uint32_t last_at;
+    if (s->timestamp_ms - last_at < 1000u) return;
+    last_at = s->timestamp_ms;
+    unsigned char bytes[4] = {0};
+    s1_wire_put(bytes, 0, 12, s->obstacle_forward_mm);
+    s1_wire_put(bytes, 12, 5, s->avoidance_phase);
+    s1_wire_put(bytes, 17, 5, s->avoidance_failed_phase);
+    s1_wire_put(bytes, 22, 4, s->avoidance_failure);
+    account((ER)mqtt_bridge_send(MQTT_ROUTE_SONAR, bytes, sizeof(bytes)));
+}
 #endif
 void s1_publish_telemetry(void)
 {
@@ -63,5 +76,6 @@ void s1_publish_telemetry(void)
     if(s.obstacle_profile ||
        (s.obstacle_valid && (uint32_t)(s.timestamp_ms-s.obstacle_timestamp_ms)<=VC_SENSOR_MAX_AGE_MS))
         account(s1_publish_obstacle(s.near_mm,s.width_mm,s.clear_left_mm,s.clear_right_mm));
+    publish_sonar(&s);
 #endif
 }

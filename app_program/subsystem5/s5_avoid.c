@@ -12,6 +12,7 @@
 #define MOTION_SETTLE_MS 260u
 #define PIVOT_PROOF_MAX_AGE_MS 1500u
 #define SCAN_TIMEOUT_MS 14000u
+#define POST_SCAN_RANGE_TIMEOUT_MS 1500u
 #define RESCAN_INTERVAL_MS 1000u
 #define RESCAN_RANGE_CHANGE_MM 30u
 #define PHASE_TIMEOUT_MS 9000u
@@ -324,8 +325,8 @@ static S5_AVOID_OUTPUT wait_for_path(S5_AVOID *state, S5_FAILURE reason, const S
     state->failure = reason;
     state->failed_phase = state->phase;
     state->blocked_range_mm = S5_UNKNOWN_RANGE;
-    if (in->range_valid &&
-        (reason == S5_FAIL_ROOM || reason == S5_FAIL_SIDE || reason >= S5_FAIL_LEFT_LIMIT))
+    if (in->range_valid && in->now - in->range_at <= S5_RANGE_MAX_AGE_MS &&
+        in->range_mm <= (state->depth ? S5_CLEAR_MM : S5_FOLLOW_CLEAR_MM))
         state->blocked_range_mm = in->range_mm;
     return go(state, S5_WAIT_PATH, in->now);
 }
@@ -403,15 +404,22 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
     if (phase == S5_WAIT_PATH) {
         /* The scan task keeps ranging at 90 degrees while stopped. A new
            sweep can begin once a current forward range justifies it. */
-        if (!in->stopped || !range_fresh || !at_or_after(in->range_at, state->phase_at)) return wait;
+        if (!in->stopped) return wait;
+        if (in->retry_scan) {
+            clear_path_failure(state);
+            state->scan_retried = true;
+            return go(state, S5_PROFILE_PATH, in->now);
+        }
+        if (!range_fresh || !at_or_after(in->range_at, state->phase_at)) return wait;
         if (in->range_mm > clear_mm) {
             clear_path_failure(state);
             return state->depth ? resume_leg(state, in, false) : go(state, S5_COMPLETE, in->now);
         }
-        /* An unchanged obstacle gives the same geometry on the next sweep. */
+        /* Allow one automatic retry if the forward echo returns or the
+           measured clearance improves. A clear path can always resume above. */
         unsigned blocked = state->blocked_range_mm;
-        if (s5_range_measured(blocked) && in->range_mm < blocked + RESCAN_RANGE_CHANGE_MM &&
-            blocked < in->range_mm + RESCAN_RANGE_CHANGE_MM) return wait;
+        if (state->scan_retried ||
+            (s5_range_measured(blocked) && in->range_mm < blocked + RESCAN_RANGE_CHANGE_MM)) return wait;
         if (elapsed >= RESCAN_INTERVAL_MS) {
             clear_path_failure(state);
             state->scan_retried = true;
@@ -472,7 +480,11 @@ S5_AVOID_OUTPUT s5_avoid_step(S5_AVOID *state, const S5_AVOID_INPUT *in)
         if (range_fresh && in->range_mm < profile.front_mm) profile.front_mm = in->range_mm;
         S5_BYPASS plan = s5_plan_bypass(&profile);
         if (s5_range_available(profile.nearest_mm) && !range_fresh &&
-            !(state->depth && plan.probe_left && proof_fresh)) return wait;
+            !(state->depth && plan.probe_left && proof_fresh)) {
+            if (in->now - in->profile_at >= POST_SCAN_RANGE_TIMEOUT_MS)
+                return wait_for_path(state, S5_FAIL_ECHO, in);
+            return wait;
+        }
         if (plan.side != S5_NO_SIDE) {
             clear_path_failure(state);
             state->side = plan.side;

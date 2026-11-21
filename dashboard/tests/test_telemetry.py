@@ -114,11 +114,29 @@ class TelemetryTests(unittest.TestCase):
         report = self.d.snapshot()['telemetry']['controller']['data']
         self.assertEqual(report['stop_reason_label'], 'Obstacle avoidance stopped the car.')
 
+    def test_open_forward_range_and_failed_detour_report_independently(self):
+        packet = bytearray(31)
+        packet[:5] = bytes((2, 5, 6, 8, 1 | 2 | 64))
+        self.send('status', b'\x07')
+        self.send('controller', packet)
+        self.send('sonar', (4094 | (12 << 12) | (16 << 17) | (6 << 22)).to_bytes(4, 'little'))
+        state = self.d.snapshot()
+        self.assertFalse(state['start_allowed'])
+        self.assertEqual(state['telemetry']['controller']['data']['start_block_label'],
+                         'Car must be put back on the tape')
+        self.assertEqual(state['telemetry']['sonar']['data'],
+                         dict(forward_mm='Open', phase='stopped', failed_phase='checking side clearance',
+                              failure='No usable sonar echo'))
+        self.assertIsNone(decode_telemetry('sonar', (4095).to_bytes(4, 'little'))['forward_mm'])
+        for invalid in (4001, 17 << 12, 17 << 17, 1 << 26):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                decode_telemetry('sonar', invalid.to_bytes(4, 'little'))
+
     def test_subscribes_every_topic(self):
         result=[]
         client=SimpleNamespace(subscribe=lambda topics:(result.extend(topics) or (0,1)))
         self.d.on_connect(client,None,None,SimpleNamespace(is_failure=False),None)
         self.assertEqual({topic.rsplit('/',1)[-1] for topic,qos in result},
-                         {'status','ack','motion','line','terrain','obstacle','vehicle','controller'})
+                         {'status','ack','motion','line','terrain','obstacle','vehicle','controller','sonar'})
 
 if __name__=='__main__':unittest.main()

@@ -158,7 +158,7 @@ static VC_INPUT controller_input(BOOL ready, BOOL linked, unsigned faults, bool 
             .echo_quiet = pending.echo_quiet && now - obstacle_range_at <= S5_RANGE_MAX_AGE_MS,
             .profile = full_profile, .profile_valid = pending.profile_valid,
             .return_at = return_at, .return_clear_mm = return_clear_mm,
-            .return_received = pending.return_received,
+            .return_received = pending.return_received, .retry_scan = pending.start,
             .line_at = data.line_timestamp_ms, .line_hit = line_hit(),
             .line_center_seen = data.c >= S5_RECOVERY_LINE_DARK,
             .line_junction = data.l >= S5_WIDE_MARKING && data.r >= S5_WIDE_MARKING,
@@ -176,7 +176,7 @@ BOOL vehicle_request_start(void)
     VC_START_BLOCK block = vc_core_start_block(&model, &input);
     data.last_start_reject = block;
     BOOL ok = block == VC_START_READY;
-    if (ok && !vc_core_running(&model)) {
+    if (ok && (!vc_core_running(&model) || model.avoidance.phase == S5_WAIT_PATH)) {
         pending.start = true;
         pending.auto_start = false;
     }
@@ -598,7 +598,7 @@ static TMO vehicle_service_once(void)
         else if (phase == S5_ALIGN_RETRY)
             tm_printf((UB*)"[S5] box or barrier still ahead toward tape at %u mm, passing %u mm farther\n",
                       (unsigned)in.avoidance.range_mm, pass);
-        if (phase == S5_FAILED)
+        if (phase == S5_FAILED || phase == S5_WAIT_PATH)
             tm_printf((UB*)"[S5] stopped during %s, detour reason=%u vehicle reason=%u, range=%u mm, motor faults=%u, encoder L=%u R=%u\n",
                       avoidance_phase_name[previous], failure, reason,
                       in.avoidance.range_valid ? (unsigned)in.avoidance.range_mm : S5_UNKNOWN_RANGE,

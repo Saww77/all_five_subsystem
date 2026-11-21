@@ -3,13 +3,26 @@ STATES = ('IDLE', 'FOLLOW_LINE', 'TURNING', 'AVOIDING', 'RECOVER_LINE', 'FAULT')
 MOTOR_MODES = ('IDLE', 'VELOCITY', 'DISTANCE', 'TURN')
 MOTOR_FAULTS = ((1, 'Encoder counts'), (2, 'Control timing'), (4, 'Wheel stalled'), (8, 'Command timeout'))
 VEHICLE_FAULTS = ((1, 'Motor'), (2, 'Encoder'), (4, 'IMU'), (8, 'Ultrasonic echo'), (16, 'Wi-Fi'))
-TELEMETRY_TOPICS = ('vehicle', 'motion', 'line', 'terrain', 'obstacle', 'controller')
+TELEMETRY_TOPICS = ('vehicle', 'motion', 'line', 'terrain', 'obstacle', 'controller', 'sonar')
 START_BLOCK_REPOSITION = 8
 STOP_REASON_OPERATOR = 1
 STOP_REASONS = (
     None, 'Operator STOP received.', 'Line follower requested a stop.',
     'Pico lost valid local IR samples.', 'Motor control fault.',
     'Command connection lost.', 'Obstacle avoidance stopped the car.',
+)
+AVOIDANCE_PHASES = (
+    'idle', 'scanning ahead', 'turning off the tape', 'leaving the tape', 'aligning for the bypass',
+    'passing the obstacle', 'turning toward the tape', 'searching for the tape', 'centring on the tape',
+    'realigning with the tape', 'aligning to pass farther', 'complete', 'stopped',
+    'checking tape and forward range', 'backing up', 'waiting for a route', 'checking side clearance',
+)
+AVOIDANCE_FAILURES = (
+    None, 'Obstacle scan timed out', 'Obstacle could not be confirmed', 'Width could not be confirmed',
+    'Too little room to turn', 'Side clearance too small', 'No usable sonar echo',
+    'Obstacle too close or clearance travel exhausted', 'Motor maneuver failed', 'Tape could not be reacquired',
+    'Operator stopped the detour', 'Controller interlock stopped the detour', 'Maneuver timed out',
+    'Left edge outside scan limits', 'Right edge outside scan limits', 'Both edges outside scan limits',
 )
 
 def command_payload(command):
@@ -19,7 +32,7 @@ def command_payload(command):
     raise ValueError('command must be start, stop or reset')
 
 def decode_telemetry(kind, payload):
-    sizes = dict(vehicle=1, motion=9, line=1, terrain=2, obstacle=6, controller=25)
+    sizes = dict(vehicle=1, motion=9, line=1, terrain=2, obstacle=6, controller=25, sonar=4)
     if kind not in sizes or len(payload) not in ((25,31) if kind=='controller' else (sizes[kind],)):
         raise ValueError('Incorrect binary telemetry length')
     word = int.from_bytes(payload, 'little')
@@ -84,6 +97,13 @@ def decode_telemetry(kind, payload):
         height, phase = bits(0, 11), bits(11, 3)
         if word >> 14 or height > 2000 or phase > 5: raise ValueError('Invalid terrain payload')
         return dict(height_mm=height, phase=phase)
+    if kind == 'sonar':
+        forward, phase, failed_phase, failure = bits(0, 12), bits(12, 5), bits(17, 5), bits(22, 4)
+        if (word >> 26 or (4000 < forward < 4094) or max(phase, failed_phase) >= len(AVOIDANCE_PHASES)):
+            raise ValueError('Invalid sonar diagnostics')
+        return dict(forward_mm='Open' if forward == 4094 else None if forward == 4095 else forward,
+                    phase=AVOIDANCE_PHASES[phase], failed_phase=AVOIDANCE_PHASES[failed_phase],
+                    failure=AVOIDANCE_FAILURES[failure])
     fields = dict(nearest_mm=bits(0, 12), width_mm=bits(12, 11),
                   left_mm=bits(23, 12), right_mm=bits(35, 12))
     if (word >> 47 or fields['nearest_mm'] > 4000 or

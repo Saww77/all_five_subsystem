@@ -230,6 +230,9 @@ class Dashboard:
             if self.client is None or not state["broker_connected"]:
                 raise CommandUnavailable("Broker is disconnected. No command was queued.")
             if command == "start" and not state["start_allowed"]:
+                controller = state["telemetry"]["controller"]
+                if controller["fresh"] and controller["data"]["start_block"]:
+                    raise CommandUnavailable(controller["data"]["start_block_label"])
                 raise CommandUnavailable("Wait for a live Pico heartbeat with all connection flags ready.")
             if command == "reset" and not state["reset_allowed"]:
                 raise CommandUnavailable("Reset requires a stopped car with a fault and a live command connection.")

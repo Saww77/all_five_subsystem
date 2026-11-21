@@ -296,6 +296,36 @@ static void test_reentry_limit(void)
     assert(out.action == S5_STOP && model.phase == S5_FAILED);
 }
 
+static void test_profile_complete_but_forward_echo_missing(void)
+{
+    S5_AVOID state = {.phase = S5_PROFILE_PATH, .phase_at = 100};
+    S5_AVOID_INPUT in = {.now = 10000, .profile_at = 10000, .profile_valid = true,
+                        .profile = obstacle(true), .stopped = true, .range_mm = S5_UNKNOWN_RANGE};
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_PROFILE_PATH);
+    in.now += 1500;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_WAIT_PATH &&
+           state.failure == S5_FAIL_ECHO);
+
+    in.now += 1000;
+    in.range_at = in.now;
+    in.range_mm = 200;
+    in.range_valid = true;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_PROFILE_PATH && state.scan_retried);
+
+    in.now += 6000;
+    in.profile_at = in.now;
+    in.range_valid = false;
+    in.now += 1500;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_WAIT_PATH);
+    in.now += 15000;
+    in.range_at = in.now;
+    in.range_valid = true;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_WAIT_PATH);
+
+    in.retry_scan = true;
+    assert(s5_avoid_step(&state, &in).action == S5_WAIT && state.phase == S5_PROFILE_PATH);
+}
+
 static void test_width_and_side_clearance(void)
 {
     S5_PROFILE scan = obstacle(true);
@@ -1127,6 +1157,7 @@ int main(void)
     test_link_loss_does_not_end_a_run();
     test_unsafe_profile_and_scan_timeout();
     test_reentry_limit();
+    test_profile_complete_but_forward_echo_missing();
     test_width_and_side_clearance();
     test_centered_and_offset_boxes();
     test_bypass_with_estimated_edges();
