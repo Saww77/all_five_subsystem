@@ -166,8 +166,8 @@ static void test_rejoin(bool left, bool open_side)
     reach_inward_turn(&model, &in, &out, left, open_side);
     S5_ACTION outward = left ? S5_ARC_LEFT : S5_ARC_RIGHT;
     /* The 188 mm sidestep puts the two crossings at 10 and 28 mm.
-       Start the final turn 6 mm before the nominal 102 mm point. */
-    cross_tape_and_center(&model, &in, &out, 10, 28, 96);
+       This leaves about 74 mm to roll before the final turn. */
+    cross_tape_and_center(&model, &in, &out, 10, 28, 102);
     start_move(&model, &in, &out, outward, 0);
     end_move(&model, &in, &out);
     assert(model.avoidance.phase == S5_CHECK_LINE);
@@ -393,14 +393,14 @@ static void test_tape_beyond_original_search_limit(void)
     assert(model.avoidance.phase == S5_FIND_LINE && !out.stop);
     tape_sample(&model, &in, &out, 220, true, false);
     tape_sample(&model, &in, &out, 221, true, false);
-    assert(!out.stop && model.avoidance.phase == S5_FIND_LINE && model.avoidance.align_at_mm == 283);
+    assert(!out.stop && model.avoidance.phase == S5_FIND_LINE && model.avoidance.align_at_mm == 289);
 
     /* The original straight command finishes before the measured turn point.
        Complete the remaining encoder distance before issuing an arc. */
     in.avoidance.search_progress_mm = 244;
     end_move(&model, &in, &out);
     assert(out.stop && model.avoidance.phase == S5_CENTER_LINE);
-    start_move(&model, &in, &out, S5_ADVANCE, 39);
+    start_move(&model, &in, &out, S5_ADVANCE, 45);
     end_move(&model, &in, &out);
     assert(model.avoidance.phase == S5_ALIGN_LINE);
 }
@@ -806,7 +806,7 @@ static void test_rounded_bypass(bool left)
     start_move(&model, &in, &out, inward, 0);
     end_move(&model, &in, &out);
     assert(model.avoidance.search_mm == 254 + S5_SEARCH_EXTENSION_MM);
-    cross_tape_and_center(&model, &in, &out, 64, 82, 150);
+    cross_tape_and_center(&model, &in, &out, 64, 82, 156);
     start_move(&model, &in, &out, outward, 0);
     end_move(&model, &in, &out);
     in.avoidance.line_hit = true;

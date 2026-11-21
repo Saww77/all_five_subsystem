@@ -24,7 +24,6 @@
                              NEAR_IR_TAPE_OFFSET_MM + REJOIN_START_CLEARANCE_MM)
 #define EDGE_OFFSET_DEADBAND_MM 20u
 #define LINE_ALIGN_TOLERANCE_MM 3
-#define REJOIN_ADVANCE_TRIM_MM 6
 
 _Static_assert(S2_ARC_ANGLE_DEG == 60u, "Return offset projections use a 60 degree arc");
 _Static_assert(S5_PASS_DEPTH_PERCENT > 0u && S5_PASS_DEPTH_PERCENT <= 100u,
@@ -260,12 +259,12 @@ static S5_AVOID_OUTPUT find_tape(S5_AVOID *state, const S5_AVOID_INPUT *in, bool
            locates the stripe when the two observations are distinct and close. */
         if (!separation || separation > diagonal_distance_mm(S5_CHASSIS_WIDTH_MM / 2u))
             return fail(state, S5_FAIL_LINE, in->now);
-        /* The two entries locate the stripe. Allow for the front sensor offset
-           and the arc's lateral travel, then trim the straight approach to
-           compensate for the observed overshoot on the car. */
+        /* Averaging the entries cancels the side offsets of the front sensors.
+           Move from the leading edge to the stripe centre, compensate for the
+           sensor-to-axle distance, and reserve the final arc's lateral travel. */
         unsigned stripe_center_mm = (left + right + 1u) / 2u + diagonal_distance_mm(TAPE_HALF_WIDTH_MM);
         int turn_start_mm = (int)(stripe_center_mm + S5_IR_TO_AXLE_MM) -
-                            (int)diagonal_distance_mm(ARC_SIDEWAYS_MM) - REJOIN_ADVANCE_TRIM_MM;
+                            (int)diagonal_distance_mm(ARC_SIDEWAYS_MM);
         if (turn_start_mm <= 0 || (unsigned)turn_start_mm > S5_MAX_LEG_MM)
             return fail(state, S5_FAIL_LINE, in->now);
         state->align_at_mm = (unsigned)turn_start_mm;
