@@ -125,6 +125,24 @@ static unsigned vehicle_state(void)
     return snapshot.state;
 }
 
+static void test_arc_echo_requires_recent_clearance(void)
+{
+    const struct { unsigned range, age; S5_ECHO_STATE echo; } cases[] = {
+        {S5_MANEUVER_STOP_MM, 60, S5_ECHO_FALL_TIMEOUT},
+        {215, VC_ECHO_GRACE_MS + 1u, S5_ECHO_FALL_TIMEOUT},
+        {215, 60, S5_ECHO_HIGH},
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        vehicle_enable_obstacle_monitor();
+        drive = (__typeof__(drive)){.command = S2_ARC, .moving = true};
+        vehicle_submit_obstacle_range(cases[i].range);
+        event_flags = 0;
+        clock_ms += cases[i].age;
+        vehicle_submit_obstacle_ping(s5_classify_echo(cases[i].echo, 0));
+        assert(event_flags == VC_WAKE && !range_valid(clock_ms) && !pending.echo_grace_used);
+    }
+}
+
 int main(void)
 {
     uint32_t request;
@@ -297,8 +315,11 @@ int main(void)
     motor_acknowledge(S2_REPLY_OK);
     work();
     uint32_t last_range_at = obstacle_range_at;
-    clock_ms += 60;
-    vehicle_submit_obstacle_ping(s5_classify_echo(S5_ECHO_QUIET, 0));
+    clock_ms += 120;
+    vehicle_submit_line(108, 0, 26, 30, 30, FALSE, 0);
+    unsigned arc_stops_before = stop_count;
+    vehicle_submit_obstacle_ping(s5_classify_echo(S5_ECHO_FALL_TIMEOUT, 0));
+    assert(work() > 0 && motor_busy && stop_count == arc_stops_before);
     assert(obstacle_range_at == last_range_at);
     assert(vehicle_get_snapshot(&snapshot) && snapshot.obstacle_forward_mm == 196 &&
            !snapshot.obstacle_no_echo && vehicle_state() == VC_AVOIDING);
@@ -372,6 +393,11 @@ int main(void)
     motor_acknowledge(S2_REPLY_OK);
     work();
     vehicle_submit_obstacle_ping(s5_classify_echo(S5_ECHO_FALL_TIMEOUT, 0));
+    assert(!event_flags && pending.echo_grace_used);
+    /* An unconfirmed no-target response does not restore the allowance. */
+    vehicle_submit_obstacle_range(S5_OPEN_RANGE);
+    assert(!event_flags && pending.echo_grace_used);
+    vehicle_submit_obstacle_ping(s5_classify_echo(S5_ECHO_QUIET, 0));
     work();
     vehicle_submit_obstacle_range(600);
     assert(vehicle_get_snapshot(&snapshot) && snapshot.state == VC_FAULT &&
@@ -433,5 +459,6 @@ int main(void)
     assert(model.avoidance.phase == S5_PROFILE_PATH && scan_count == scans_before + 1 &&
            !queued_command);
 
-    puts("PASS MQTT loss, local STOP, echo recovery on the straight pass and no return scan");
+    test_arc_echo_requires_recent_clearance();
+    puts("PASS one missed arc echo, persistent echo loss, straight-pass recovery and local STOP");
 }

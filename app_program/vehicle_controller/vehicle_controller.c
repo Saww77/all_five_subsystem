@@ -31,8 +31,8 @@ static VEHICLE_SNAPSHOT data;
 static VC_MODEL model;
 static struct {
     unsigned start:1, stop:1, line_stop:1, auto_start:1, reset:1;
-    unsigned obstacle_monitor:1, profile_valid:1, scan:2, echo_quiet:1, follow_blocked:1;
-    unsigned echo_fall_timeout:1;
+    unsigned obstacle_monitor:1, profile_valid:1, scan:2, follow_blocked:1;
+    unsigned last_echo:3, echo_grace_used:1;
 } pending;
 static uint32_t reset_started, reset_refreshed;
 static S5_RANGE_GATE obstacle_range;
@@ -154,8 +154,9 @@ static VC_INPUT controller_input(BOOL ready, BOOL linked, unsigned faults, bool 
         .avoidance = {
             .now = now, .range_at = obstacle_range_at, .range_mm = obstacle_range.range_mm,
             .range_valid = range_valid(now), .profile_at = full_profile_at,
-            .echo_quiet = pending.echo_quiet && now - obstacle_range_at <= S5_RANGE_MAX_AGE_MS,
-            .echo_fall_timeout = pending.echo_fall_timeout && now - obstacle_range_at <= S5_RANGE_MAX_AGE_MS,
+            .echo_quiet = pending.last_echo == S5_ECHO_QUIET && now - obstacle_range_at <= S5_RANGE_MAX_AGE_MS,
+            .echo_fall_timeout = pending.last_echo == S5_ECHO_FALL_TIMEOUT &&
+                                now - obstacle_range_at <= S5_RANGE_MAX_AGE_MS,
             .profile = full_profile, .profile_valid = pending.profile_valid,
             .retry_scan = pending.start,
             .line_at = data.line_timestamp_ms, .line_hit = line_hit(),
@@ -194,7 +195,8 @@ void vehicle_enable_obstacle_monitor(void)
 {
     if (!lock()) return;
     pending.obstacle_monitor = true;
-    pending.echo_quiet = pending.echo_fall_timeout = false;
+    pending.last_echo = S5_ECHO_TIMING;
+    pending.echo_grace_used = false;
     pending.follow_blocked = false;
     obstacle_range = (S5_RANGE_GATE){.range_mm = S5_UNKNOWN_RANGE, .blocked = true};
     unlock();
@@ -205,20 +207,24 @@ static void submit_obstacle_reading(unsigned range, S5_ECHO_STATE echo)
 {
     if (!lock()) return;
     uint32_t now = now_ms();
-    bool quiet = echo == S5_ECHO_QUIET;
-    /* An arc may start inside the line-follow stop range. A recent reading
-       above the maneuver reserve can cover one quiet ping during that arc. */
-    bool arc_clear = (drive.command & 15u) == S2_ARC &&
+    /* A bounded arc may be inside the line-follow stop range. Require the
+       arc's own reserve before retaining a reading across one missed echo. */
+    bool arc_clear = !drive.velocity && (drive.command & 15u) == S2_ARC &&
                      obstacle_range.range_mm > S5_MANEUVER_STOP_MM;
-    bool hold = quiet && !pending.echo_quiet && s5_range_available(obstacle_range.range_mm) &&
+    bool missed = echo == S5_ECHO_QUIET || (arc_clear && echo == S5_ECHO_FALL_TIMEOUT);
+    bool hold = missed && !pending.echo_grace_used && s5_range_available(obstacle_range.range_mm) &&
                 (!obstacle_range.blocked || arc_clear) && now - obstacle_range_at <= VC_ECHO_GRACE_MS;
-    pending.echo_quiet = quiet;
-    pending.echo_fall_timeout = echo == S5_ECHO_FALL_TIMEOUT;
+    pending.last_echo = echo;
     bool accepted = false;
-    if (hold) obstacle_range.first_open = false;
-    else accepted = s5_accept_range(&obstacle_range, range);
+    if (hold) {
+        pending.echo_grace_used = true;
+        obstacle_range.first_open = false;
+    } else {
+        accepted = s5_accept_range(&obstacle_range, range);
+    }
     if (accepted) {
         obstacle_range_at = now;
+        pending.echo_grace_used = false;
         /* Unknown range already blocks independently. Preserve the last
            measured hysteresis decision without treating silence as near. */
         if (s5_range_available(range)) {
@@ -525,6 +531,7 @@ static TMO vehicle_service_once(void)
     data.state = model.state;
     unsigned reason = data.reason = model.reason;
     unsigned failure = model.avoidance.failure;
+    unsigned last_echo = pending.last_echo;
     data.motor_faults = in.motor_faults;
     TMO delay = pending.reset ? (TMO)VC_REFRESH_MS : TMO_FEVR;
     if (vc_core_running(&model)) {
@@ -569,10 +576,11 @@ static TMO vehicle_service_once(void)
             tm_printf((UB*)"[S5] bypass %s, sideways target=%u mm, initial forward target=%u mm\n",
                       side == S5_LEFT ? "T (left)" : "R (right)", offset, pass);
         if (phase == S5_FAILED || phase == S5_WAIT_PATH)
-            tm_printf((UB*)"[S5] stopped during %s, detour reason=%u vehicle reason=%u, range=%u mm, motor faults=%u, encoder L=%u R=%u\n",
+            tm_printf((UB*)"[S5] stopped during %s, detour reason=%u vehicle reason=%u, "
+                          "range=%u mm, echo state=%u, motor faults=%u, encoder L=%u R=%u\n",
                       avoidance_phase_name[previous], failure, reason,
                       in.avoidance.range_valid ? (unsigned)in.avoidance.range_mm : S5_UNKNOWN_RANGE,
-                      in.motor_faults, s2_get_bits(&status,41,13), s2_get_bits(&status,54,13));
+                      last_echo, in.motor_faults, s2_get_bits(&status,41,13), s2_get_bits(&status,54,13));
     }
     return delay;
 }
