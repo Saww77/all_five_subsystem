@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SE09 Vehicle Dashboard</title>
+<style>
+  :root {
+    color-scheme: dark; background: #101713; color: #f1f5f0;
+    font: 16px/1.5 "Segoe UI", system-ui, sans-serif;
+    --muted: #a5b7ab; --border: #33443a; --green: #cafa88; --danger: #ffbdad;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  main { width: min(1050px, calc(100% - 40px)); margin: 48px auto; }
+  header, .panel { border: 1px solid var(--border); border-radius: 14px; padding: 24px; }
+  header { display: flex; justify-content: space-between; align-items: center; gap: 24px; background: #18261d; }
+  h1, h2, p, dl { margin: 0; }
+  h1 { font-size: clamp(1.5rem, 4vw, 2.25rem); letter-spacing: -.035em; }
+  h2 { font-size: 1.12rem; margin-bottom: 14px; }
+  p, dt { color: var(--muted); }
+  .online { color: var(--green); }
+  .offline, #faults { color: var(--danger); }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1.25fr 1fr; margin-top: 16px; }
+  .panel { background: #151e18; min-width: 0; }
+  dl { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  dt { font-size: .82rem; }
+  dd { margin: 0; font-size: 1.07rem; font-variant-numeric: tabular-nums; }
+  form { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
+  label { color: var(--muted); display: grid; gap: 5px; font-size: .83rem; }
+  select, button { font: inherit; color: #f1f5f0; background: #233329; border: 1px solid #486050;
+                   border-radius: 7px; padding: 7px 11px; }
+  button { color: #142010; background: var(--green); border-color: transparent; cursor: pointer; font-weight: 600; }
+  button:focus-visible, select:focus-visible { outline: 2px solid white; outline-offset: 3px; }
+  button:disabled, select:disabled { opacity: .55; cursor: default; }
+  #stop { background: var(--danger); color: #361b14; white-space: nowrap; }
+  #mapping { display: flex; gap: 7px; flex-wrap: wrap; padding: 0; margin: 18px 0; list-style: none; }
+  #mapping li { background: #233329; border-radius: 5px; padding: 3px 8px; }
+  #feedback, #route-feedback, #faults, #setup { margin-top: 12px; font-size: .9rem; }
+  @media (max-width: 700px) {
+    main { margin-top: 20px; }
+    .grid { grid-template-columns: 1fr; }
+    header, .panel { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>SE09 Vehicle Dashboard</h1><p id="connection" role="status">Connecting…</p></div>
+    <button type="button" id="stop" disabled>Emergency stop</button>
+  </header>
+  <p id="feedback" role="status"></p>
+  <div class="grid">
+    <section class="panel" aria-labelledby="status-heading">
+      <h2 id="status-heading">Vehicle status</h2>
+      <dl>
+        <div><dt>State</dt><dd id="phase">—</dd></div>
+        <div><dt>Line sensor</dt><dd id="line">—</dd></div>
+        <div><dt>Speed</dt><dd id="speed">—</dd></div>
+        <div><dt>Distance travelled</dt><dd id="distance">—</dd></div>
+        <div><dt>Latest barcode</dt><dd id="barcode">—</dd></div>
+        <div><dt>Highest hump</dt><dd id="hump">—</dd></div>
+        <div><dt>Motion</dt><dd id="terrain">—</dd></div>
+        <div><dt>Obstacle</dt><dd id="obstacle">—</dd></div>
+      </dl>
+      <p id="setup" role="status" hidden></p>
+      <p id="faults" role="status"></p>
+    </section>
+    <section class="panel" aria-labelledby="route-heading">
+      <h2 id="route-heading">Barcode actions</h2>
+      <form id="form">
+        <label>Letter<select id="letter" disabled></select></label>
+        <label>Action<select id="action" disabled></select></label>
+        <button id="save" disabled>Save mapping</button>
+      </form>
+      <ul id="mapping" aria-label="Active mappings"></ul>
+      <p id="route-feedback" role="status">Waiting for the car's mapping.</p>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const actions = ["Unassigned", "Left", "Right", "Straight", "U-turn"];
+let snapshot = {};
+let editing = false;
+let waitingFor = null;
+let requestInFlight = false;
+for (const letter of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") $("letter").add(new Option(letter, letter));
+actions.forEach((action, index) => $("action").add(new Option(action, index)));
+
+function setText(id, text) {
+  if ($(id).textContent !== String(text)) $(id).textContent = text;
+}
+
+function syncAction() {
+  $("action").value = String(snapshot.routes?.[$("letter").value] ?? 0);
+  editing = false;
+}
+
+function render(next) {
+  const changed = snapshot.route_version !== next.route_version;
+  snapshot = next;
+  const state = next.status;
+  setText("connection", next.online ? "Online" : next.broker ? "Waiting for vehicle telemetry" : "Broker offline");
+  $("connection").className = next.online ? "online" : "offline";
+  $("stop").disabled = !next.online;
+  if (state) {
+    setText("phase", state.phase);
+    let setupHint = state.setup ?? "";
+    if (state.phase === "Ready") {
+      setupHint = state.line ? "Keep the car still on the line, then tap GP21 to start."
+                             : "Place the line sensors over the track until the line is detected.";
+    }
+    $("setup").hidden = !next.online || !setupHint;
+    setText("setup", setupHint);
+    setText("line", state.line ? "Detected" : "Out of view");
+    setText("speed", state.speed_mm_s + " mm/s");
+    setText("distance", (state.distance_mm / 1000).toFixed(2) + " m");
+    setText("barcode", state.barcode ?? "—");
+    setText("hump", state.hump_mm ? state.hump_mm + " mm" : "—");
+    setText("terrain", state.terrain);
+    setText("obstacle", state.width_mm ? state.width_mm + " mm · " + state.plan :
+              state.front_mm != null && state.front_mm <= 250 ? state.front_mm + " mm ahead" : "—");
+    setText("faults", state.faults.join(" · "));
+    if (state.phase === "Stopped" && state.faults.includes("Emergency stop")) {
+      setText("feedback", "Emergency stop confirmed.");
+    }
+  }
+  if (changed && next.routes) {
+    const items = Object.entries(next.routes).filter(([, action]) => action !== 0);
+    $("mapping").replaceChildren(...items.map(([letter, action]) => {
+      const item = document.createElement("li");
+      item.textContent = letter + " · " + actions[action];
+      return item;
+    }));
+    if (!editing) syncAction();
+    if (waitingFor === null && !editing) setText("route-feedback", items.length ? "" : "No assigned letters.");
+  }
+  if (waitingFor !== null && next.routes) {
+    if (next.routes[waitingFor.letter] === waitingFor.action && !next.pending) {
+      setText("route-feedback", "Mapping confirmed by the car.");
+      waitingFor = null;
+      syncAction();
+    } else if (!next.pending && Date.now() - waitingFor.time > 10000) {
+      setText("route-feedback", "The car has not confirmed the mapping.");
+      waitingFor = null;
+    }
+  }
+  const busy = requestInFlight || !!next.pending || waitingFor !== null;
+  $("letter").disabled = $("action").disabled = $("save").disabled = !next.online || !next.routes || busy;
+}
+
+async function refresh() {
+  try {
+    const response = await fetch("/api/status", {cache: "no-store"});
+    render(await response.json());
+  } catch {
+    setText("connection", "Dashboard disconnected");
+    for (const id of ["stop", "letter", "action", "save"]) $(id).disabled = true;
+  } finally {
+    setTimeout(refresh, 1000);
+  }
+}
+
+async function post(path, data) {
+  const response = await fetch(path, {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(data)
+  });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error);
+  return body;
+}
+
+$("letter").addEventListener("change", syncAction);
+$("action").addEventListener("change", () => { editing = true; });
+$("form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const letter = $("letter").value;
+  const action = Number($("action").value);
+  requestInFlight = true;
+  $("save").disabled = true;
+  try {
+    const reply = await post("/api/routes", {
+      version: snapshot.route_version, routes: {...snapshot.routes, [letter]: action}
+    });
+    setText("route-feedback", reply.message);
+    waitingFor = snapshot.routes[letter] === action ? null : {letter, action, time: Date.now()};
+  } catch (error) {
+    setText("route-feedback", error.message);
+    syncAction();
+  } finally {
+    requestInFlight = false;
+  }
+});
+
+$("stop").addEventListener("click", async () => {
+  $("stop").disabled = true;
+  try {
+    const reply = await post("/api/stop", {});
+    setText("feedback", reply.message);
+  } catch (error) {
+    setText("feedback", error.message);
+  }
+});
+refresh();
+</script>
+</body>
+</html>

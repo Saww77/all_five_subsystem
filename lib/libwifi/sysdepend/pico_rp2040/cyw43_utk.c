@@ -37,6 +37,7 @@
  * CYW43_LINK_FAIL until the next power cycle, so re-issue the join on a fixed
  * backoff for as long as the link is down. */
 #define WIFI_REJOIN_DELAY_US (5 * 1000 * 1000ull)
+#define WIFI_JOIN_GRACE_US  (20 * 1000 * 1000ull)
 
 /* Overridable from the makefile if an AP needs something else. MIXED accepts
  * both TKIP and AES; the driver treats it the same as WPA2_AES_PSK for a
@@ -248,7 +249,8 @@ void cyw43_utk_task(int32_t stacd, void *exinf)
         /* Only the *request* outcome. The AP's verdict shows up later as
          * radio_status.link_status, polled below, which is also where a
          * failed association gets retried. */
-        result = wifi_try_join();
+        (void)wifi_try_join();
+        result = 0; /* Interface is ready even if the first join request fails. */
 #else
         result = cyw43_wifi_scan(&cyw43_state, &options, &radio_status,
                                  scan_result);
@@ -274,7 +276,7 @@ void cyw43_utk_task(int32_t stacd, void *exinf)
     }
 
 #if TM_NET_LWIP
-    int32_t  prev_link_status = radio_status.link_status;
+    int32_t  prev_link_status = INT32_MAX;
     uint64_t rejoin_at = 0;
 #endif
 
@@ -300,23 +302,16 @@ void cyw43_utk_task(int32_t stacd, void *exinf)
                           (int)radio_status.link_status);
             }
 
-            /* Negative == the association attempt is over and lost. Arm a
-             * retry; a positive-but-not-UP status (JOIN/NOIP) is still making
-             * progress, so leave it alone and let DHCP finish. */
-            rejoin_at = (radio_status.link_status < 0)?
-                        time_us_64() + WIFI_REJOIN_DELAY_US: 0;
+            int32_t state = radio_status.link_status;
+            rejoin_at = state == CYW43_LINK_UP ? 0u :
+                        time_us_64() + (state <= CYW43_LINK_DOWN
+                            ? WIFI_REJOIN_DELAY_US : WIFI_JOIN_GRACE_US);
         }
 
         if(rejoin_at != 0 && time_us_64() >= rejoin_at) {
-            rejoin_at = 0;
-            if(radio_status.link_status < 0) {
-                (void)wifi_try_join();
-                /* Force the next iteration to treat whatever comes back as a
-                 * change, so the new outcome is always reported. Must be a
-                 * value cyw43_tcpip_link_status() can never return (it yields
-                 * -3..3), or a genuine repeat failure would be swallowed. */
-                prev_link_status = 0x7fffffff;
-            }
+            int32_t attempt = wifi_try_join();
+            rejoin_at = time_us_64() + (attempt == 0
+                       ? WIFI_JOIN_GRACE_US : WIFI_REJOIN_DELAY_US);
         }
 #else
         was_scanning = radio_status.scan_active != 0;

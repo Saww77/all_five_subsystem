@@ -1,24 +1,3 @@
-# Subsystem 3 — test log
+# Subsystem 3 Test Log
 
-**Subsystem:** Consumer (example)  ·  **Student ID:** <student ID>  ·  **Code:** `app_program/subsystem3/`
-
-See `testing/README.md` for how to run tests and record results.
-
-## Test cases
-
-Define a test here before running it. Test IDs never change.
-
-| ID | What is tested | Requirement / interface | Method | Steps / how | Expected result |
-|---|---|---|---|---|---|
-| S3-U01 | statistics self-consistent (min ≤ max, 0..100) | | auto | `subsystem3_test.c` | `[TEST] S3-U01 PASS` |
-
-*Method:* **auto** = `TEST_CHECK` in code, result printed on the console;
-**manual** = a person observes the result (LED, scope, meter, phone app…).
-
-## Results
-
-Add a new row for every run. Never edit or delete old rows.
-
-| Date | Test ID | Commit | Tester | Result | Log / evidence | Notes |
-|---|---|---|---|---|---|---|
-| YYYY-MM-DD | S3-U01 | `abc1234` | | PASS / FAIL | `logs/YYYY-MM-DD_….txt` | |
+Host checks exercise A and Z print traces and all 26 synthetic letters in both scan directions, noise inside the steering deadband and malformed Code 39 rejection. Use S3-01 and S3-02 in [the bench plan](../README.md) to record physical tracking error and reads with the left-side GP27 sensor.

@@ -1,4 +1,4 @@
-﻿/*
+/*
  *----------------------------------------------------------------------
  *    Device Driver for μT-Kernel 3.0
  *
@@ -39,15 +39,15 @@
  *	  channel 0 = GP26, channel 1 = GP27, channel 2 = GP28
  *	  channel 3 = GP29 is the Pico W RADIO CLOCK: never set _3 to TRUE.
  */
-#define	DEVCONF_ADC_PIN_INIT_0	TRUE // Left sensor (GP26)
-#define	DEVCONF_ADC_PIN_INIT_1	TRUE // Center sensor, Barcode (GP27)
-#define	DEVCONF_ADC_PIN_INIT_2	TRUE // Right sensor (GP28)
+#define	DEVCONF_ADC_PIN_INIT_0	TRUE
+#define	DEVCONF_ADC_PIN_INIT_1	TRUE
+#define	DEVCONF_ADC_PIN_INIT_2	TRUE
 #define	DEVCONF_ADC_PIN_INIT_3	FALSE
 
 /* Interrupt t priority */
 #define	DEVCNF_ADC_INTPRI	2
 
 /* A/D conversion timeout time */
-#define	DEVCNF_ADC_TMOSCAN	1000
+#define	DEVCNF_ADC_TMOSCAN	8
 
 #endif		/* __DEV_ADC_CNF_RP2040_H__ */

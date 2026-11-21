@@ -16,7 +16,7 @@
 # by SIO CPUID and needs the same profile.
 ################################################################################
 
-SMP ?= 1
+SMP ?= 0
 
 ifneq ($(SMP),0)
 ifneq ($(SMP),1)
@@ -54,7 +54,7 @@ endif
 # sys_check_timeouts(), and any application tcp_*/udp_*/dns_* call -- runs
 # on the same processor-1-owned task that already services the radio, per
 # docs/RELEASE.md safety rule 6. See lib/liblwip/sysdepend/pico_rp2040/.
-NET ?= none
+NET ?= lwip
 ifneq ($(filter $(NET),none lwip),$(NET))
 $(error Unknown NET '$(NET)'; use none or lwip)
 endif
@@ -70,7 +70,7 @@ endif
 # lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c. Broker address and topic
 # come from config/wifi_secrets.h (gitignored; copy from
 # config/wifi_secrets.example.h), same as the WiFi credentials.
-MQTT ?= 0
+MQTT ?= 1
 ifneq ($(filter $(MQTT),0 1),$(MQTT))
 $(error Unknown MQTT '$(MQTT)'; use 0 or 1)
 endif
@@ -81,31 +81,13 @@ endif
 MQTT_SUFFIX := _mqtt
 endif
 
-# TEST=1 builds the subsystem self-tests into the image (APP_TEST=1 in C).
-# The image gets a _test suffix so it cannot be mistaken for the normal one.
+# TEST=1 builds a motor-inhibited image with the stationary GP21 sonar bench.
 TEST ?= 0
 ifneq ($(filter $(TEST),0 1),$(TEST))
 $(error Unknown TEST '$(TEST)'; use 0 or 1)
 endif
 ifeq ($(TEST),1)
 TEST_SUFFIX := _test
-endif
-
-ifneq ($(origin BUDDY1_API_TEST),undefined)
-$(error BUDDY1_API_TEST has been removed; use WIFI=cyw43 NET=lwip MQTT=1 BUDDY1_DEMO=1 for the real motion APIs)
-endif
-BUDDY1_DEMO ?= 0
-ifneq ($(filter $(BUDDY1_DEMO),0 1),$(BUDDY1_DEMO))
-$(error Unknown BUDDY1_DEMO '$(BUDDY1_DEMO)'; use 0 or 1)
-endif
-ifeq ($(BUDDY1_DEMO),1)
-ifneq ($(MQTT),1)
-$(error BUDDY1_DEMO=1 requires WIFI=cyw43 NET=lwip MQTT=1)
-endif
-ifneq ($(SMP),1)
-$(error BUDDY1_DEMO=1 requires SMP=1 for Buddy 2 encoder IRQ ownership)
-endif
-DEMO_SUFFIX := _b1demo
 endif
 
 # CRASH_REPORT=1 also copies every console line to UART0 on GP0 (TX) /
@@ -127,20 +109,17 @@ ifeq ($(CONSOLE)$(CRASH_REPORT),usb_cdc1)
 CRASH_SUFFIX := _crash
 endif
 
-ifeq ($(BUDDY1_DEMO),1)
-ifneq ($(CRASH_REPORT),0)
-$(error Buddy 2 uses GP0/GP1 encoders; use CONSOLE=usb_cdc CRASH_REPORT=0)
-endif
-endif
-
 #
 # Images are named after the profile they were built with.  Every image is
 # flashed by hand from a downloads folder, so identically-named artifacts are
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
 #
-#EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(NET_SUFFIX)$(MQTT_SUFFIX)$(CRASH_SUFFIX)$(TEST_SUFFIX)
-EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(NET_SUFFIX)$(MQTT_SUFFIX)$(CRASH_SUFFIX)$(DEMO_SUFFIX)$(TEST_SUFFIX)
+ifneq ($(CONSOLE)$(CRASH_REPORT),usb_cdc0)
+$(error The tested right encoder uses GPIO0. Build with USB console and CRASH_REPORT=0)
+endif
+
+EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(NET_SUFFIX)$(MQTT_SUFFIX)$(CRASH_SUFFIX)$(TEST_SUFFIX)
 
 GCC := arm-none-eabi-gcc
 AS := arm-none-eabi-gcc
@@ -200,8 +179,7 @@ ifeq ($(SMP),1)
 CFLAGS  += -DCNF_SMP=1
 ASFLAGS += -DCNF_SMP=1
 endif
-#CFLAGS  += -DAPP_TEST=$(TEST)
-CFLAGS  += -DAPP_TEST=$(TEST) -DAPP_BUDDY1_DEMO=$(BUDDY1_DEMO)
+CFLAGS  += -DAPP_TEST=$(TEST)
 CFLAGS  += -DTM_CONSOLE_UART=$(CRASH_REPORT)
 ifeq ($(CRASH_REPORT),0)
 CFLAGS  += -DBOARD_UART0_FREE=1
@@ -233,8 +211,8 @@ endif
 # profile, so both can coexist. This runs at parse time, so it completes
 # before any recipe executes.
 ################################################################################
-#PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)
-PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)-b1demo$(BUDDY1_DEMO)
+
+PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)
 PROFILE_FILE := .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))
@@ -468,8 +446,7 @@ mtkernel_3/cyw43/cyw43_lwip.o: $(CYW43_DRIVER_PATH)/src/cyw43_lwip.c
 ifeq ($(MQTT),1)
 
 MQTT_CORE_OBJS := ./mtkernel_3/lwip/apps/mqtt/mqtt.o
-MQTT_PORT_OBJS := ./mtkernel_3/lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.o \
-                  ./mtkernel_3/lib/liblwip/sysdepend/pico_rp2040/mqtt_bridge.o
+MQTT_PORT_OBJS := ./mtkernel_3/lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.o
 
 CFLAGS += -DTM_MQTT=1
 
