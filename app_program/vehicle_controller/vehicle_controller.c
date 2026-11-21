@@ -500,7 +500,9 @@ static TMO vehicle_service_once(void)
     if (in.reset) {
         if (in.avoidance.stopped && !in.motor_faults) {
             reset_done = true;
-            model = (VC_MODEL){0};
+            /* Clear the fault, but require tape evidence before a new START after a failed detour. */
+            bool reposition = model.reposition_required || model.avoidance.phase == S5_FAILED;
+            model = (VC_MODEL){.reposition_required = reposition};
             pending.profile_valid = false;
             pending.scan = SCAN_OFF;
             tracking_straight = false;

@@ -20,8 +20,9 @@ VC_START_BLOCK vc_core_start_block(const VC_MODEL *model, const VC_INPUT *in)
     if (!in->line_valid) return VC_START_NO_LINE;
     if (in->line_age_ms > VC_LINE_MAX_AGE_MS) return VC_START_OLD_LINE;
     if (in->line_stop) return VC_START_LINE_STOP;
-    if (model->avoidance.phase == S5_FAILED &&
-        (!in->avoidance.line_hit || in->avoidance.line_junction)) return VC_START_OBSTACLE;
+    if ((model->reposition_required || model->avoidance.phase == S5_FAILED) &&
+        ((!in->avoidance.line_hit && !in->avoidance.line_center_seen) || in->avoidance.line_junction))
+        return VC_START_OBSTACLE;
     return VC_START_READY;
 }
 
@@ -53,6 +54,7 @@ void vc_core_step(VC_MODEL *m, const VC_INPUT *in, VC_OUTPUT *out)
     if (!vc_core_running(m)) {
         if (!in->start || vc_core_start_block(m, in) != VC_START_READY) return;
         m->state = VC_FOLLOW_LINE;
+        m->reposition_required = false;
         m->avoidance = (S5_AVOID){0};
     }
 

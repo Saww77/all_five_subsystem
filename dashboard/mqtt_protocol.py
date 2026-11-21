@@ -4,6 +4,8 @@ MOTOR_MODES = ('IDLE', 'VELOCITY', 'DISTANCE', 'TURN')
 MOTOR_FAULTS = ((1, 'Encoder counts'), (2, 'Control timing'), (4, 'Wheel stalled'), (8, 'Command timeout'))
 VEHICLE_FAULTS = ((1, 'Motor'), (2, 'Encoder'), (4, 'IMU'), (8, 'Ultrasonic echo'), (16, 'Wi-Fi'))
 TELEMETRY_TOPICS = ('vehicle', 'motion', 'line', 'terrain', 'obstacle', 'controller')
+START_BLOCK_REPOSITION = 8
+STOP_REASON_OPERATOR = 1
 
 def command_payload(command):
     if command == 'start': return b'\x01'
@@ -25,7 +27,7 @@ def decode_telemetry(kind, payload):
             raise ValueError('Invalid controller sensor or target range')
         blocks = ('Ready for START', 'Motor startup not ready', 'Wi-Fi/MQTT not ready',
                   'Motor fault latched', 'STOP / reset pending', 'No valid IR readings',
-                  'IR readings are stale', 'Junction / line stop latched', 'Obstacle blocks the path')
+                  'IR readings are stale', 'Junction / line stop latched', 'Car must be put back on the tape')
         hints = ('Controller start checks pass.', 'Wait at least five seconds after powering the Pico.',
                  'Wait for Wi-Fi, broker and command subscription.',
                  'Inspect motor faults before resetting or restarting.',
@@ -33,7 +35,7 @@ def decode_telemetry(kind, payload):
                  'Check the IR sensor AO connections and ADC read errors on USB serial.',
                  'The sensor task is not supplying fresh data; inspect USB serial.',
                  'Place the car on a straight away from crossings, then restart the Pico. The junction test remains halted until restart.',
-                 'Clear the obstacle interlock through its producer before retrying START.')
+                 'Place the car on a straight section of tape before retrying START.')
         age = int.from_bytes(payload[14:16], 'little')
         return dict(state=STATES[payload[1]], stop_reason=payload[2], start_block=payload[3],
                     start_block_label=blocks[payload[3]], start_hint=hints[payload[3]],

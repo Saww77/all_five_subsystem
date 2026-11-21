@@ -80,8 +80,8 @@ Set `BUDDY1_MOSQUITTO` or `BUDDY1_BROWSER` if executable paths are not discovera
 
 Replace both the dashboard and Pico firmware with matching current versions. A heartbeat confirms network connectivity, not that the motors and sensors are ready. The Vehicle controller panel reports the actual START blocker. Wait at least five seconds after power-up and start on a straight section, not a crossing. Read the named blocker before resetting faults. If it says diagnostics unavailable, the Pico is running older firmware or the topic root does not match. Send the blocker text and IR/target values for diagnosis; a generic one-byte rejected ACK alone cannot identify the cause.
 
-## Reset a motor fault
+## Reset a stopped fault
 
-With matching timing/reset firmware, a stopped motor fault enables **Reset fault**. Press it once and wait for the ACK and IDLE state, then press START separately. It never resumes automatically. If a timing fault returns, capture the displayed **Gap / limit** numbers before clearing it. A timing gap over the configured limit still stops the car.
+With current firmware and a live command connection, a stopped motor or controller fault enables **Reset fault**. Press it once and wait for the ACK and IDLE state. After a failed detour, put the car back on a straight section of tape before pressing START separately. If a timing fault returns, capture the displayed **Gap / limit** numbers before clearing it.
 
 The command is binary02; accepted RESET ACK04, rejected RESET ACK06. Existing START/STOP bytes are unchanged. Controller diagnostics version2 has31 bytes and adds reset-pending, latched timing gap and limit; older version1/25-byte diagnostics still display but cannot enable RESET. Raw ADC values and total distance remain unreported.
