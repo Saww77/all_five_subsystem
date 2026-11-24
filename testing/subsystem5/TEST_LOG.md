@@ -61,7 +61,7 @@ Place a flat box about 200 mm ahead. Confirm the forward echo, five coarse beari
 
 ### Track acceptance
 
-Repeat a run on clear tape with no sonar target. An unavailable echo should leave line following active and the servo at 90°. Present a box within 230 mm and verify that the wheels stop and the servo sweeps only if the centered check confirms a close target. If a confirmed close target's echo drops out, the car should hold at rest while checking forward.
+Repeat a run on clear tape with no sonar target. An unavailable echo should leave line following active and the servo at 90°. Present a box within 230 mm and verify that the wheels stop and the servo sweeps only if the centered check confirms a close target. If a confirmed close target's echo drops out, the car should hold at rest while checking forward. After a successful detour, line following should resume when the IR sensors confirm the tape, including when forward echoes are unavailable.
 
 Use the MQTT build with a single stationary box, a clear bypass lane, and STOP available. Start on a straight section, with the box ahead and room on one side. Verify that both wheels stop before the sweep, that the car commits only after a scan identifies a usable route, and that the outer IR sensors find the original tape before the dashboard returns to Follow line. Repeat with room on the other side and with both sides blocked before the scan. The firmware uses the measured 130 mm from the outer IR sensors to the axle and their 30 mm left-to-right spacing. Recheck `S5_IR_TO_AXLE_MM` and `S5_OUTER_IR_SPACING_MM` if the sensors are remounted.
 
